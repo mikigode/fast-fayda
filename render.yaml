@@ -1,0 +1,51 @@
+# Render Blueprint. Point Render at this repo and it reads this file.
+#
+# Everything secret is `sync: false`, which means Render prompts for it once in
+# the dashboard and stores it there. None of it belongs in this file — a
+# database password committed to a repository is a database password published,
+# and rotating one is much slower than never publishing it.
+services:
+  - type: web
+    name: fast-fayda
+    runtime: node
+    # Free needs no card. It sleeps after fifteen minutes idle and cold-starts
+    # on the next request — roughly a minute — so the first person to message
+    # after a quiet spell waits, and may have to send twice. Telegram retries a
+    # delivery it could not make, so the message usually lands rather than
+    # vanishing.
+    #
+    # That is a fine trade while testing and a poor one once people are paying.
+    # Change this to `starter` when it matters, and nothing else changes.
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    # Render restarts an instance that stops answering this.
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render assigns the port and expects the service to listen on it.
+      # src/env.ts reads PORT, so this only pins it for clarity.
+      - key: PORT
+        value: 8080
+
+      # ---- set these in the Render dashboard ----
+      # Use Supabase's *Session pooler* string, not the db.<ref>.supabase.co
+      # one — see README, "Deploying to Render". Direct connections are IPv6
+      # only, and Render dials out over IPv4.
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false
+      - key: ADMIN_CONTACT
+        sync: false
+      - key: BOT_SUPPORT_CHAT_ID
+        sync: false
+      - key: POINT_PRICE_ETB
+        value: "15"

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.DS_Store
+
+# Tesseract language data, downloaded for local OCR checks and never read by
+# the app. Roughly 10MB that would otherwise ride along in every clone.
+*.traineddata

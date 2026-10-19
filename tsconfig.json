@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    /*
+     * CommonJS output, rather than ESM.
+     *
+     * The source is written with extensionless relative imports, which Node's
+     * ESM loader will not resolve — an ESM build would mean appending `.js` to
+     * every import of a `.ts` file, which reads like a mistake to everyone who
+     * meets it later. Nothing here needs ESM-only features, so the build target
+     * is the one that runs without ceremony.
+     */
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

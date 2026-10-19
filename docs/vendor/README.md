@@ -1,0 +1,29 @@
+# Vendor documentation
+
+The card API's own integration guides, kept here because `src/bot/card.ts` is
+written against them and a claim in a comment is easier to trust when the
+source is next to it.
+
+| File | What it covers |
+|---|---|
+| `fayda-api-telegram-bot-integration-guide.pdf` | `POST /verify-otp` → **PDF bytes**. What this bot uses. |
+| `fayda-api-json-integration-guide.pdf` | `POST /verify-otp-json` → identity data as JSON fields. Not used. |
+
+Two things from these shaped the implementation, and both fail confusingly
+rather than loudly if missed:
+
+**A successful verify is not JSON.** `/verify-otp` answers with the raw PDF on
+success and JSON on every error, so the response is read as bytes and the
+content type inspected before anything parses it. A client that calls
+`.json()` unconditionally gets a syntax error from `%PDF-1.4` and reports a
+successful verification as a failure — with the point already spent.
+
+**Never call both verify endpoints for the same OTP.** Each successful verify
+deducts a point. The JSON endpoint would return the same identity as fields
+instead of a rendered document; this integration wants the document, so it uses
+the PDF endpoint and leaves the other alone.
+
+These are third-party documents, reproduced here for reference. They are not
+authored by this project, and they are not a licence — see
+`../relying-party-application.md` for the question of whether the service
+described here is itself an authorised relying party.

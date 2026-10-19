@@ -1,0 +1,26 @@
+# Keep the long-running server out of Vercel's sight entirely.
+#
+# Vercel's zero-configuration detection finds src/server.ts — reachable from the
+# `start` script through tsconfig's outDir — decides this repository is a server
+# application, and deploys it as the handler for every path. It has no default
+# export, being a process that listens rather than a function that returns, so
+# every request then fails with:
+#
+#   Invalid export found in module "/var/task/src/server.cjs".
+#   The default export must be a function or server.
+#
+# `builds` in vercel.json is supposed to switch that detection off. This file
+# does not rely on it: a file that was never uploaded cannot be chosen. Nothing
+# reachable from api/ imports either of these — api/ reaches src/webhook.ts,
+# src/env.ts, src/db.ts and src/bot/*, and no further.
+#
+# Both remain in the repository and are what Render and Docker run.
+src/server.ts
+src/poller.ts
+
+# Never needed at runtime, and smaller uploads are faster deploys.
+tests
+dist
+migrations
+render.yaml
+Dockerfile

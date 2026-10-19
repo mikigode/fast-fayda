@@ -1,0 +1,17 @@
+{
+  /*
+   * The build compiles src only; this adds the tests, so `npm run typecheck`
+   * covers them too. Without it a test can drift out of step with the code it
+   * tests and only fail at runtime, which is the wrong end to find it.
+   */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}
