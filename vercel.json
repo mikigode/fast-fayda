@@ -12,6 +12,11 @@
   ],
 
   "rewrites": [
+    { "source": "/", "destination": "/api/health" },
+    { "source": "/health", "destination": "/api/health" },
+
+    { "source": "/webhook", "destination": "/api/webhook" },
+
     { "source": "/admin", "destination": "/api/admin" },
     { "source": "/admin/:path*", "destination": "/api/admin" }
   ]
