@@ -34,9 +34,19 @@ function header(request: VercelRequest, name: string): string | undefined {
 function formBody(body: unknown): URLSearchParams {
   if (typeof body === "string") return new URLSearchParams(body);
   if (body && typeof body === "object") {
-    return new URLSearchParams(
-      Object.entries(body as Record<string, unknown>).map(([key, value]) => [key, String(value)]),
-    );
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+      if (Array.isArray(value)) {
+        for (const v of value) {
+          params.append(key, String(v));
+        }
+      } else if (value === null || value === undefined) {
+        params.append(key, "");
+      } else {
+        params.append(key, String(value));
+      }
+    }
+    return params;
   }
   return new URLSearchParams();
 }
