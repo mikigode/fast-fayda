@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "routes": [
+    {
+      "src": "/webhook",
+      "dest": "/api/webhook"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/health"
+    },
+    {
+      "src": "/",
+      "dest": "/api/health"
+    },
+    {
+      "src": "/admin",
+      "dest": "/api/admin"
+    },
+    {
+      "src": "/admin/(.*)",
+      "dest": "/api/admin"
+    }
+  ]
+}
