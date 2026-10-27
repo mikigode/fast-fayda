@@ -401,7 +401,8 @@ tap OTP 1/2/3  → balance checked first, cost named
 send a FAN     → provider sends a code to the phone registered against it
 send the code  → the provider's original PDF comes back and is delivered
                  as a Telegram document (or, for "Printable Card", an A4
-                 sheet is rendered from the JSON identity)
+                 sheet is rendered from the JSON identity), followed by the
+                 same card as a PNG
 ```
 
 A FAN is verified through the endpoint that matches the chosen download format:
@@ -409,7 +410,11 @@ A FAN is verified through the endpoint that matches the chosen download format:
 except "Printable Card"), or **`/verify-otp-json`** when the A4 printable sheet
 is wanted, which is rendered here from the identity fields (photo and QR
 included). Each successful verify costs a point, so the two are never both
-called for the same code. Although the published docs describe a
+called for the same code. The picture that follows the document comes from
+whichever endpoint was used: the designed front-and-back image for "Printable
+Card", and a rasterisation of the provider's own PDF pages for the rest — so a
+PDF delivery also arrives as a PNG, without a second verify. Although the
+published docs describe a
 `{ otp, fanNumber, session }` body, the live API refuses that with "finNumber is
 required" (on both endpoints). The bot only ever collects a 16-digit FAN, so the
 client derives the required 12-digit `finNumber` from it — the FAN's last 12

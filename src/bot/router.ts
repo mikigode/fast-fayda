@@ -9,6 +9,7 @@ import {
 import { liveCardProvider, type CardProvider } from "./card";
 import { broadcastToUsers } from "./broadcast";
 import { CARD_IMAGE_FILENAME, toCardImage } from "./cardImage";
+import { toPdfImage } from "./pdfImage";
 import { toIdentityPdf, toPrintable } from "./printable";
 import { open, seal } from "../crypto";
 import { currentProvider, hashId, last4, parseId, type FaydaProvider } from "./fayda";
@@ -1098,20 +1099,22 @@ async function onOtpSubmitted(
     );
 
     // The card also goes out as a picture, right after the document: the PDF is
-    // what gets printed, the image is what gets forwarded. It carries its own
-    // guard because the card has been delivered by now — an image that fails to
-    // render or upload must not read as a lost card to the catch below.
-    if (result.format === "json") {
-      try {
-        const image = await toCardImage(result.identity, serial);
-        await deps.api.sendPhoto(
-          user.chatId,
-          { bytes: image, filename: CARD_IMAGE_FILENAME },
-          { caption: c.otpCardImage },
-        );
-      } catch (error) {
-        console.error("card image delivery failed:", error instanceof Error ? error.message : error);
-      }
+    // what gets printed, the image is what gets forwarded. Which picture depends
+    // on what came back — the printable sheet is drawn from the identity fields,
+    // while the provider's own PDF has no fields and is rendered page for page
+    // instead. It carries its own guard because the card has been delivered by
+    // now — an image that fails to render or upload must not read as a lost card
+    // to the catch below.
+    try {
+      const image =
+        result.format === "json" ? await toCardImage(result.identity, serial) : await toPdfImage(result.pdf);
+      await deps.api.sendPhoto(
+        user.chatId,
+        { bytes: image, filename: CARD_IMAGE_FILENAME },
+        { caption: c.otpCardImage },
+      );
+    } catch (error) {
+      console.error("card image delivery failed:", error instanceof Error ? error.message : error);
     }
   } catch (error) {
     // The card is paid for twice over by this point — a point upstream and a

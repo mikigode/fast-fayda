@@ -24,6 +24,11 @@ of a rendered document; the bot uses the PDF endpoint for the document and asks
 for JSON only when the customer chose the "Printable Card" format, which is
 rendered here from those fields. One choice is made per code, never both.
 
+The PDF is also sent as a picture, and that picture is the PDF: PDFium renders
+its pages to a PNG (see `src/bot/pdfImage.ts`) after the document has gone out.
+No identity fields are involved, so no second verify is needed. The JSON flow's
+picture is drawn from the identity instead (`src/bot/cardImage.ts`).
+
 These are third-party documents, reproduced here for reference. They are not
 authored by this project, and they are not a licence — see
 `../relying-party-application.md` for the question of whether the service

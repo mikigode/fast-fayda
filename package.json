@@ -19,6 +19,7 @@
     "doctor": "node scripts/doctor.mjs"
   },
   "dependencies": {
+    "@hyzyla/pdfium": "^3.0.0",
     "@napi-rs/canvas": "^1.0.11",
     "@supabase/server": "^1.4.1",
     "pdf-lib": "^1.17.1",

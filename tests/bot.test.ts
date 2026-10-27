@@ -1645,8 +1645,15 @@ describe("card retrieval", () => {
     // is allocated or printed on it.
     expect(store.cardSerials).toHaveLength(0);
     expect(api.documents[0]?.caption).not.toContain("SN:");
-    // The PDF carries no identity fields, so there is no rendered card image.
-    expect(api.photos).toHaveLength(0);
+    // The document is also sent as a picture. It carries no identity fields to
+    // draw the designed card from, so its own pages are rendered instead — one
+    // verify, one point, both outputs.
+    expect(api.photos).toHaveLength(1);
+    expect(api.photos[0]?.filename).toBe("fayda-card.png");
+    expect(api.photos[0]?.bytes.subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    expect(api.photos[0]?.caption).toContain("image");
 
     expect(await store.getBalance(CHAT)).toBe(2);
     expect(store.users.get(CHAT)?.state).toBe("idle");
