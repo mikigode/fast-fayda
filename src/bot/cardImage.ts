@@ -141,17 +141,70 @@ const SIZE_ISSUE = 23;
 const SIZE_BACK = 32;
 
 /**
- * Amharic and Latin do not share a face here: the system Latin fonts have no
- * Ethiopic glyphs and would render the name as boxes. Pick the first family
- * actually installed, falling back to the Latin choice so text still appears.
+ * The faces are bundled, not borrowed from the host.
+ *
+ * A serverless runtime can ship without any fonts at all: Vercel's Node image
+ * has none, so Skia has nothing to shape glyphs with and `fillText` draws
+ * nothing - quietly, while `fillRect` (the barcode and the separator bars)
+ * still draws. The card that came back from production was exactly that: the
+ * design, the photo, the QR, the bars and the barcode, and not one name, date,
+ * number or label rendered from text.
+ *
+ * So Noto Sans and Noto Sans Ethiopic are kept under `assets/fonts` and
+ * registered here, and they lead the candidate lists so a card looks the same
+ * on every host. Both are SIL OFL 1.1; the licence is `assets/fonts/OFL.txt`.
+ *
+ * Every path is spelled out rather than assembled from a directory and a file
+ * name: Vercel traces the files a function reads statically, and a path built
+ * at runtime is invisible to that tracer, so the fonts would not be deployed.
+ */
+const BUNDLED_FONT_PATHS = [
+  typeof __dirname === "string" ? join(__dirname, "..", "..", "assets", "fonts", "NotoSans-Regular.ttf") : null,
+  typeof __dirname === "string" ? join(__dirname, "..", "assets", "fonts", "NotoSans-Regular.ttf") : null,
+  join(process.cwd(), "assets", "fonts", "NotoSans-Regular.ttf"),
+  typeof __dirname === "string" ? join(__dirname, "..", "..", "assets", "fonts", "NotoSans-Bold.ttf") : null,
+  typeof __dirname === "string" ? join(__dirname, "..", "assets", "fonts", "NotoSans-Bold.ttf") : null,
+  join(process.cwd(), "assets", "fonts", "NotoSans-Bold.ttf"),
+  typeof __dirname === "string" ? join(__dirname, "..", "..", "assets", "fonts", "NotoSansEthiopic-Regular.ttf") : null,
+  typeof __dirname === "string" ? join(__dirname, "..", "assets", "fonts", "NotoSansEthiopic-Regular.ttf") : null,
+  join(process.cwd(), "assets", "fonts", "NotoSansEthiopic-Regular.ttf"),
+  typeof __dirname === "string" ? join(__dirname, "..", "..", "assets", "fonts", "NotoSansEthiopic-Bold.ttf") : null,
+  typeof __dirname === "string" ? join(__dirname, "..", "assets", "fonts", "NotoSansEthiopic-Bold.ttf") : null,
+  join(process.cwd(), "assets", "fonts", "NotoSansEthiopic-Bold.ttf"),
+].filter((path): path is string => path !== null);
+
+for (const path of BUNDLED_FONT_PATHS) {
+  try {
+    // Returns null when the file is absent, which is why the host's fonts are
+    // still fallbacks below: a card with text in the wrong face beats a blank.
+    GlobalFonts.registerFromPath(path);
+  } catch {
+    // Unreadable or invalid; try the next candidate.
+  }
+}
+
+if (GlobalFonts.families.length === 0) {
+  // Not fatal - the photo, the QR and the barcode are not text - but every
+  // name, date and number will be missing, which reads as a broken design
+  // rather than a host without fonts. Make the cause obvious in the logs.
+  console.error("card image: no fonts are available, so text will be missing from the card");
+}
+
+/**
+ * Amharic and Latin do not share a face here: the Latin fonts have no Ethiopic
+ * glyphs and would render the name as boxes. Pick the first family actually
+ * available, falling back to the Latin choice so text still appears.
  */
 function pickFamily(candidates: string[], fallback: string): string {
   const installed = new Set(GlobalFonts.families.map((font) => font.family));
   return candidates.find((name) => installed.has(name)) ?? fallback;
 }
 
-const LATIN = pickFamily(["Segoe UI", "Arial", "DejaVu Sans", "Liberation Sans"], "sans-serif");
-const ETHIOPIC = pickFamily(["Nyala", "Noto Sans Ethiopic", "Abyssinica SIL", "Ebrima"], LATIN);
+const LATIN = pickFamily(["Noto Sans", "Segoe UI", "Arial", "DejaVu Sans", "Liberation Sans"], "sans-serif");
+const ETHIOPIC = pickFamily(
+  ["Noto Sans Ethiopic", "Nyala", "Abyssinica SIL", "Ebrima"],
+  LATIN,
+);
 
 function font(weight: number | string, size: number, family: string): string {
   return `${weight} ${size}px "${family}"`;

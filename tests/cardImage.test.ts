@@ -1,3 +1,4 @@
+import { GlobalFonts, createCanvas, loadImage } from "@napi-rs/canvas";
 import { describe, expect, it } from "vitest";
 import type { CardIdentity } from "@/bot/card";
 import { CARD_IMAGE_FILENAME, code128B, groupFan, toCardImage } from "@/bot/cardImage";
@@ -77,6 +78,43 @@ describe("toCardImage", () => {
 
   it("sends the filename Telegram is given, which the router passes through", () => {
     expect(CARD_IMAGE_FILENAME).toBe("fayda-card.png");
+  });
+
+  it("ships the fonts it draws with, so a host without fonts still renders", () => {
+    // Importing the renderer registers the bundled faces. If `assets/fonts`
+    // ever stops travelling with a deployment, text silently disappears
+    // again, so the families are part of what this module is allowed to claim.
+    const families = new Set(GlobalFonts.families.map((font) => font.family));
+
+    expect(families.has("Noto Sans")).toBe(true);
+    expect(families.has("Noto Sans Ethiopic")).toBe(true);
+  });
+
+  it("draws the values as glyphs, not only the shapes around them", async () => {
+    // A host with no fonts is not an error: `fillText` just draws nothing,
+    // while the barcode and divider bars (drawn with fillRect) still appear.
+    // Production once returned exactly that card, so this checks the rows that
+    // can only be ink if a font was found and used.
+    const png = await toCardImage(IDENTITY);
+    const image = await loadImage(png);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+
+    const inkIn = (x: number, y: number, width: number, height: number): number => {
+      const { data } = ctx.getImageData(x, y, width, height);
+      let ink = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i]! < 120 && data[i + 1]! < 120 && data[i + 2]! < 120) ink++;
+      }
+      return ink;
+    };
+
+    expect(inkIn(495, 235, 465, 45)).toBeGreaterThan(200); // Amharic name
+    expect(inkIn(495, 292, 495, 40)).toBeGreaterThan(200); // English name
+    expect(inkIn(495, 375, 435, 50)).toBeGreaterThan(100); // date of birth
+    expect(inkIn(1380, 90, 440, 45)).toBeGreaterThan(100); // phone
+    expect(inkIn(1520, 645, 380, 50)).toBeGreaterThan(100); // FIN
   });
 
   it("still renders when the photo and QR code are unusable", async () => {
