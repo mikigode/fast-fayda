@@ -178,11 +178,40 @@ export async function handleAdmin(req: AdminRequest, res: AdminResponse, deps: A
   }
 
   if (req.path === "/admin/api/admins" && req.method === "POST") {
-    const telegramId = Number(req.form.get("telegramId"));
-    if (Number.isSafeInteger(telegramId) && telegramId !== 0) {
-      await deps.store.grantAdmin(telegramId, adminId);
+    if (!deps.adminIds.includes(adminId)) {
+      return res.redirect(
+        "/admin?flash=" + encodeURIComponent("Only a super admin can grant admin access."),
+      );
     }
-    return res.redirect("/admin");
+    const telegramId = Number(req.form.get("telegramId"));
+    if (!Number.isSafeInteger(telegramId) || telegramId <= 0) {
+      return res.redirect(
+        "/admin?flash=" + encodeURIComponent("Enter a numeric Telegram id."),
+      );
+    }
+    if (deps.adminIds.includes(telegramId)) {
+      return res.redirect(
+        "/admin?flash=" + encodeURIComponent(`${telegramId} is already a super admin.`),
+      );
+    }
+    if (!(await deps.store.hasUser(telegramId))) {
+      return res.redirect(
+        "/admin?flash=" +
+          encodeURIComponent(
+            "That person must start the bot before they can be granted access.",
+          ),
+      );
+    }
+    const already = (await deps.store.listGrantedAdmins()).some(
+      (row) => row.telegramId === telegramId,
+    );
+    await deps.store.grantAdmin(telegramId, adminId);
+    return res.redirect(
+      "/admin?flash=" +
+        encodeURIComponent(
+          already ? `${telegramId} is already an admin.` : `Granted admin access to ${telegramId}.`,
+        ),
+    );
   }
 
   // --- broadcast -------------------------------------------------------
@@ -230,13 +259,17 @@ async function renderDashboard(adminId: number, deps: AdminDeps, flash?: string)
     deps.cards.balance(),
   ]);
 
+  const isSuper = deps.adminIds.includes(adminId);
   const admins = [
-    ...deps.adminIds.map((id) => ({ telegramId: id, addedBy: null })),
-    ...granted.filter((g) => !deps.adminIds.includes(g.telegramId)),
+    ...deps.adminIds.map((id) => ({ telegramId: id, addedBy: null, superAdmin: true })),
+    ...granted
+      .filter((g) => !deps.adminIds.includes(g.telegramId))
+      .map((g) => ({ telegramId: g.telegramId, addedBy: g.addedBy, superAdmin: false })),
   ];
 
   return dashboardPage({
     self: `Signed in as ${adminId}`,
+    canGrant: isSuper,
     cardBalance,
     purchases: purchases.map((p) => ({
       id: p.id,

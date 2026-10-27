@@ -102,6 +102,8 @@ type Copy = {
   btnBuyPoints: string;
   btnMyPoints: string;
   btnSettings: string;
+  /** Shown only to admins, below the customer buttons. */
+  btnAdmin: string;
 
   /** `name` is the first name or @username, already escaped; may be empty. */
   welcomeBot: (args: { name: string; points: number }) => string;
@@ -325,6 +327,7 @@ const en: Copy = {
   btnBuyPoints: "💳 Buy Points",
   btnMyPoints: "📊 My Points",
   btnSettings: "⚙️ Settings",
+  btnAdmin: "🛠 Admin",
 
   welcomeBot: ({ name, points }) =>
     `${name ? `Hello ${name}! 👋` : "👋"}\n\n` +
@@ -591,6 +594,7 @@ const am: Copy = {
   btnBuyPoints: "💳 ነጥብ ይግዙ",
   btnMyPoints: "📊 የእኔ ነጥብ",
   btnSettings: "⚙️ ቅንብሮች",
+  btnAdmin: "🛠 አስተዳዳሪ",
 
   welcomeBot: ({ name, points }) =>
     `${name ? `ሰላም ${name}! 👋` : "👋"}\n\n` +

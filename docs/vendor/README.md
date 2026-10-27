@@ -6,8 +6,8 @@ source is next to it.
 
 | File | What it covers |
 |---|---|
-| `fayda-api-telegram-bot-integration-guide.pdf` | `POST /verify-otp` → **PDF bytes**. What this bot uses. |
-| `fayda-api-json-integration-guide.pdf` | `POST /verify-otp-json` → identity data as JSON fields. Not used. |
+| `fayda-api-telegram-bot-integration-guide.pdf` | `POST /verify-otp` → **PDF bytes**. The default: delivers the provider's original PDF. |
+| `fayda-api-json-integration-guide.pdf` | `POST /verify-otp-json` → identity data as JSON. Used for the "Printable Card" format. |
 
 Two things from these shaped the implementation, and both fail confusingly
 rather than loudly if missed:
@@ -19,9 +19,10 @@ content type inspected before anything parses it. A client that calls
 successful verification as a failure — with the point already spent.
 
 **Never call both verify endpoints for the same OTP.** Each successful verify
-deducts a point. The JSON endpoint would return the same identity as fields
-instead of a rendered document; this integration wants the document, so it uses
-the PDF endpoint and leaves the other alone.
+deducts a point. The JSON endpoint returns the same identity as fields instead
+of a rendered document; the bot uses the PDF endpoint for the document and asks
+for JSON only when the customer chose the "Printable Card" format, which is
+rendered here from those fields. One choice is made per code, never both.
 
 These are third-party documents, reproduced here for reference. They are not
 authored by this project, and they are not a licence — see

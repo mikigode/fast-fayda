@@ -97,10 +97,12 @@ export function dashboardPage(input: {
     /** Whether a Card API key is stored in the portal. The key itself is never shown. */
     cardApiKeySet: boolean;
   };
-  admins: { telegramId: number; addedBy: number | null }[];
+  admins: { telegramId: number; addedBy: number | null; superAdmin: boolean }[];
+  /** Whether the viewer is a super admin, and so may grant access. */
+  canGrant: boolean;
   flash?: string;
 }): string {
-  const { self, cardBalance, purchases, jobs, settings, admins, flash } = input;
+  const { self, cardBalance, purchases, jobs, settings, admins, canGrant, flash } = input;
 
   // At zero, every OTP retrieval fails for every customer — so this is the one
   // number on the page that needs to be noticed before it becomes a problem,
@@ -158,7 +160,13 @@ export function dashboardPage(input: {
   const adminRows = admins
     .map(
       (a) =>
-        `<li>${a.telegramId}${a.addedBy ? ` <span class="muted">(added by ${a.addedBy})</span>` : ` <span class="muted">(from ADMIN_TELEGRAM_IDS)</span>`}</li>`,
+        `<li><code>${a.telegramId}</code> <span class="muted">${
+          a.superAdmin
+            ? "super admin (ADMIN_TELEGRAM_IDS)"
+            : a.addedBy
+              ? `admin (added by ${a.addedBy})`
+              : "admin"
+        }</span></li>`,
     )
     .join("");
 
@@ -188,9 +196,11 @@ export function dashboardPage(input: {
       `<p><button type="submit">Save settings</button></p>` +
       `</form>` +
       `<h2>Admins</h2><ul>${adminRows}</ul>` +
-      `<form method="post" action="/admin/api/admins">` +
-      `<input name="telegramId" placeholder="Telegram id" required inputmode="numeric" pattern="[0-9]+">` +
-      `<button type="submit">Grant access</button></form>` +
+      (canGrant
+        ? `<form method="post" action="/admin/api/admins">` +
+          `<input name="telegramId" placeholder="Telegram id" required inputmode="numeric" pattern="[0-9]+">` +
+          `<button type="submit">Grant access</button></form>`
+        : `<p class="muted">Only a super admin can grant or revoke admin access.</p>`) +
       `<h2>Post to all users</h2>` +
       `<p class="muted">Sends one message to everyone who has started the bot. This cannot be undone.</p>` +
       `<form method="post" action="/admin/api/broadcast">` +

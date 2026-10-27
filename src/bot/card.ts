@@ -17,12 +17,14 @@ import type { BotStore } from "./store";
  * succeeds with finNumber 670831630236, and the response echoes the same `fin`.
  * If the provider ever changes that contract, verifying breaks loudly here.
  *
- * **The bot verifies through `/verify-otp-json`, not `/verify-otp`.** Both
- * endpoints want the FIN, but JSON returns the identity fields the bot renders
- * itself (`photo` and `qrCode` as base64), which is what lets the guide's
- * "printable" output work. The PDF branch below is kept because this is a
- * faithful client of the provider's API — it still reads that endpoint
- * correctly — but the bot never selects it, and `format` should stay `"json"`.
+ * **The verify format follows the customer's download choice.** `/verify-otp`
+ * returns the provider's rendered PDF — what "PDF mirror" (the default) and
+ * every other format deliver unchanged. `/verify-otp-json` returns the identity
+ * fields the printable A4 sheet and the card image are drawn from, so it is
+ * used only for the "Printable Card" format. Each successful verify costs a
+ * point, so the endpoint is chosen once, before the call, and the other is
+ * never asked for the same code. The PDF branch below is a faithful client of
+ * the provider's API either way.
  *
  * **A successful JSON verify is not a PDF, and a PDF verify is not JSON.** The
  * two endpoints invert each other, so the response is always read as bytes

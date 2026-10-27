@@ -84,8 +84,25 @@ function makeStore(
     async pendingCardJobs() {
       return [];
     },
+    grantedAdmins: [] as number[],
     async listGrantedAdmins() {
-      return [] as { telegramId: number; addedBy: number | null; createdAt: string }[];
+      return this.grantedAdmins.map((telegramId) => ({
+        telegramId,
+        addedBy: ADMIN_ID,
+        createdAt: "",
+      }));
+    },
+    async hasUser(telegramId: number) {
+      return recipients.some((row) => row.telegramId === telegramId);
+    },
+    async grantAdmin(telegramId: number) {
+      if (!this.grantedAdmins.includes(telegramId)) this.grantedAdmins.push(telegramId);
+    },
+    async revokeAdmin(telegramId: number) {
+      const at = this.grantedAdmins.indexOf(telegramId);
+      if (at === -1) return false;
+      this.grantedAdmins.splice(at, 1);
+      return true;
     },
     async getSettings() {
       return stored;
@@ -122,11 +139,15 @@ function adminCookie(id = ADMIN_ID) {
   return `admin_session=${encodeURIComponent(signSession(id, SECRET))}`;
 }
 
-function makeDeps(store: ReturnType<typeof makeStore>, api: FakeApi): AdminDeps {
+function makeDeps(
+  store: ReturnType<typeof makeStore>,
+  api: FakeApi,
+  adminIds: number[] = [ADMIN_ID],
+): AdminDeps {
   return {
     store: store as unknown as BotStore,
     botToken: "123456:TEST",
-    adminIds: [ADMIN_ID],
+    adminIds,
     sessionSecret: SECRET,
     api,
     cards: unconfiguredCardProvider,
@@ -419,5 +440,131 @@ describe("admin settings", () => {
 
     expect(out.status).toBe(200);
     expect(out.body).toContain("not set (using CARD_API_KEY)");
+  });
+});
+
+describe("portal admin management", () => {
+  const REGULAR = 77;
+  const NEW_ADMIN = 88;
+
+  async function getDashboard(
+    store: ReturnType<typeof makeStore>,
+    signedInAs = ADMIN_ID,
+  ): Promise<string> {
+    const { out, res } = makeRes();
+    await handleAdmin(
+      {
+        method: "GET",
+        path: "/admin",
+        cookie: adminCookie(signedInAs),
+        form: new URLSearchParams(),
+        query: new URLSearchParams(),
+        secure: false,
+      } satisfies AdminRequest,
+      res,
+      makeDeps(store, new FakeApi()),
+    );
+    expect(out.status).toBe(200);
+    return out.body ?? "";
+  }
+
+  async function grant(
+    store: ReturnType<typeof makeStore>,
+    telegramId: string,
+    signedInAs = ADMIN_ID,
+  ) {
+    const { out, res } = makeRes();
+    await handleAdmin(
+      {
+        method: "POST",
+        path: "/admin/api/admins",
+        cookie: adminCookie(signedInAs),
+        form: new URLSearchParams({ telegramId }),
+        query: new URLSearchParams(),
+        secure: false,
+      } satisfies AdminRequest,
+      res,
+      makeDeps(store, new FakeApi()),
+    );
+    return out;
+  }
+
+  it("labels the environment admins as super admins and offers the grant form", async () => {
+    const store = makeStore([{ telegramId: NEW_ADMIN, chatId: 889 }]);
+
+    const body = await getDashboard(store);
+
+    expect(body).toContain("super admin (ADMIN_TELEGRAM_IDS)");
+    expect(body).toContain('action="/admin/api/admins"');
+  });
+
+  it("shows a granted admin as an admin, without the grant form", async () => {
+    const store = makeStore(
+      [
+        { telegramId: REGULAR, chatId: 771 },
+        { telegramId: NEW_ADMIN, chatId: 889 },
+      ],
+      [ADMIN_ID, REGULAR],
+    );
+    store.grantedAdmins = [REGULAR];
+
+    const body = await getDashboard(store, REGULAR);
+
+    expect(body).toContain(`<code>${REGULAR}</code>`);
+    expect(body).toContain(`admin (added by ${ADMIN_ID})`);
+    expect(body).not.toContain('action="/admin/api/admins"');
+    expect(body).toContain("Only a super admin can grant or revoke admin access.");
+  });
+
+  it("refuses a grant posted by a granted admin", async () => {
+    const store = makeStore(
+      [{ telegramId: NEW_ADMIN, chatId: 889 }],
+      [ADMIN_ID, REGULAR],
+    );
+    store.grantedAdmins = [REGULAR];
+
+    const out = await grant(store, String(NEW_ADMIN), REGULAR);
+
+    expect(out.status).toBe(303);
+    expect(flashOf(out.location)).toContain("Only a super admin");
+    expect(store.grantedAdmins).toEqual([REGULAR]);
+  });
+
+  it("grants access to a user who has started the bot", async () => {
+    const store = makeStore([{ telegramId: NEW_ADMIN, chatId: 889 }]);
+
+    const out = await grant(store, String(NEW_ADMIN));
+
+    expect(flashOf(out.location)).toBe(`Granted admin access to ${NEW_ADMIN}.`);
+    expect(store.grantedAdmins).toContain(NEW_ADMIN);
+  });
+
+  it("refuses an id that has never started the bot", async () => {
+    const store = makeStore([]);
+
+    const out = await grant(store, "999999");
+
+    expect(flashOf(out.location)).toContain("must start the bot");
+    expect(store.grantedAdmins).toHaveLength(0);
+  });
+
+  it("says so when the id is already an admin or a super admin", async () => {
+    const store = makeStore([{ telegramId: NEW_ADMIN, chatId: 889 }]);
+    store.grantedAdmins = [NEW_ADMIN];
+
+    const already = await grant(store, String(NEW_ADMIN));
+    expect(flashOf(already.location)).toContain("already an admin");
+
+    const superAdmin = await grant(store, String(ADMIN_ID));
+    expect(flashOf(superAdmin.location)).toContain("already a super admin");
+  });
+
+  it("rejects a non-numeric id", async () => {
+    const store = makeStore([{ telegramId: NEW_ADMIN, chatId: 889 }]);
+
+    const out = await grant(store, "operator");
+
+    expect(flashOf(out.location)).toContain("numeric Telegram id");
+    expect(store.grantedAdmins).toHaveLength(0);
   });
 });

@@ -25,6 +25,8 @@ export type BotState =
   | "awaiting_grant"
   /** An admin chose "Post to all users"; the next message is the announcement. */
   | "awaiting_post"
+  /** A super admin chose "Add admin"; the next message should be a Telegram id. */
+  | "awaiting_admin"
   /** Tapped Screenshot/Upload PDF; the next message should be the file itself. */
   | "awaiting_upload";
 
@@ -160,8 +162,16 @@ export type BotStore = {
   // ---- portal admins -----------------------------------------------------
   /** True if telegramId is in the environment allow-list OR the grantable table. */
   isAdmin(telegramId: number, envAdminIds: number[]): Promise<boolean>;
+  /**
+   * True if this Telegram id has started the bot. A grant is a foreign key into
+   * bot_users, so this is checked before one to give the operator a reason
+   * rather than a database error.
+   */
+  hasUser(telegramId: number): Promise<boolean>;
   listGrantedAdmins(): Promise<{ telegramId: number; addedBy: number | null; createdAt: string }[]>;
   grantAdmin(telegramId: number, addedBy: number): Promise<void>;
+  /** Revokes a granted (non-environment) admin. False when there was nothing to revoke. */
+  revokeAdmin(telegramId: number): Promise<boolean>;
 
   // ---- broadcast ---------------------------------------------------------
   /**
@@ -274,6 +284,7 @@ const STATES: BotState[] = [
   "awaiting_otp",
   "awaiting_grant",
   "awaiting_post",
+  "awaiting_admin",
   "awaiting_upload",
 ];
 
@@ -753,6 +764,15 @@ export const dbStore: BotStore = {
     });
   },
 
+  async hasUser(telegramId) {
+    return withDb(async (q) => {
+      const found = await q.one(`select 1 from bot_users where telegram_id = $1`, [
+        String(telegramId),
+      ]);
+      return found !== null;
+    });
+  },
+
   async grantAdmin(telegramId, addedBy) {
     await withDb((q) =>
       q.run(
@@ -760,6 +780,12 @@ export const dbStore: BotStore = {
          on conflict (telegram_id) do nothing`,
         [String(telegramId), String(addedBy)],
       ),
+    );
+  },
+
+  async revokeAdmin(telegramId) {
+    return withDb(async (q) =>
+      (await q.run(`delete from bot_admins where telegram_id = $1`, [String(telegramId)])) > 0,
     );
   },
 

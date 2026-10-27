@@ -313,8 +313,19 @@ class FakeStore implements BotStore {
     return this.grantedAdmins.map((telegramId) => ({ telegramId, addedBy: null, createdAt: "" }));
   }
 
-  async grantAdmin(telegramId: number) {
+  async grantAdmin(telegramId: number, _addedBy: number) {
     if (!this.grantedAdmins.includes(telegramId)) this.grantedAdmins.push(telegramId);
+  }
+
+  async hasUser(telegramId: number) {
+    return this.users.has(telegramId);
+  }
+
+  async revokeAdmin(telegramId: number) {
+    const at = this.grantedAdmins.indexOf(telegramId);
+    if (at === -1) return false;
+    this.grantedAdmins.splice(at, 1);
+    return true;
   }
 
   // ---- broadcast -----------------------------------------------------
@@ -1317,6 +1328,173 @@ describe("admin panel", () => {
     expect(api.lastScreen.text).toContain("too long");
     expect(store.users.get(ADMIN)?.state).toBe("awaiting_post");
   });
+
+  /**
+   * A DB-granted admin has never been in ADMIN_TELEGRAM_IDS, so an admin check
+   * that only reads the environment would leave them unable to use the panel
+   * they were granted. These tests exercise a second operator — one granted
+   * through the portal — alongside the super admin from the environment.
+   */
+  const REGULAR = 55_000;
+
+  const asMessage = (id: number, text: string): TgUpdate => ({
+    update_id: ++updateId,
+    message: {
+      message_id: ++updateId,
+      chat: { id, type: "private" },
+      from: { id, first_name: "Operator", username: "operator" },
+      text,
+    },
+  });
+
+  const asTap = (id: number, data: string): TgUpdate => ({
+    update_id: ++updateId,
+    callback_query: {
+      id: `cb-${updateId}`,
+      from: { id, first_name: "Operator" },
+      message: { message_id: 1, chat: { id, type: "private" } },
+      data,
+    },
+  });
+
+  /** Starts the bot as someone else, so their user row exists. */
+  async function startAs(id: number) {
+    await handleUpdate(asMessage(id, "/start"), deps);
+    await handleUpdate(asTap(id, "lang:en"), deps);
+    api.screens = [];
+    api.sent = [];
+  }
+
+  it("draws the Admin button only for admins", async () => {
+    await startIn("en");
+    await handleUpdate(message("📊 My Points"), deps);
+    expect(api.mainButtons()).not.toContain("🛠 Admin");
+
+    await adminStartIn();
+    await handleUpdate(adminMessage("📊 My Points"), deps);
+    expect(api.mainButtons()).toContain("🛠 Admin");
+  });
+
+  it("treats a database-granted admin as an admin, with the button and the panel", async () => {
+    store.grantedAdmins = [REGULAR];
+    await startAs(REGULAR);
+
+    await handleUpdate(asMessage(REGULAR, "📊 My Points"), deps);
+    expect(api.mainButtons()).toContain("🛠 Admin");
+
+    await handleUpdate(asMessage(REGULAR, "/admin"), deps);
+    expect(api.lastScreen.text).toContain("Role: <b>admin</b>");
+    expect(api.buttons()).toContain("ap:post");
+    // Only a super admin may grow the operator list.
+    expect(api.buttons()).not.toContain("ap:add");
+    expect(api.buttons()).not.toContain("ap:admins");
+  });
+
+  it("offers admin management to a super admin", async () => {
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+
+    expect(api.lastScreen.text).toContain("Role: <b>super admin</b>");
+    expect(api.buttons()).toContain("ap:add");
+    expect(api.buttons()).toContain("ap:admins");
+  });
+
+  it("refuses admin management from a granted admin", async () => {
+    store.grantedAdmins = [REGULAR];
+    await startAs(REGULAR);
+
+    await handleUpdate(asTap(REGULAR, "ap:add"), deps);
+    expect(api.lastScreen.text).toContain("Only a super admin");
+    expect(store.users.get(REGULAR)?.state).not.toBe("awaiting_admin");
+
+    await handleUpdate(asTap(REGULAR, "ap:admins"), deps);
+    expect(api.lastScreen.text).toContain("Only a super admin");
+  });
+
+  it("grants access to someone who has started the bot, and tells them", async () => {
+    await startAs(REGULAR);
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+    await handleUpdate(adminTap("ap:add"), deps);
+    expect(store.users.get(ADMIN)?.state).toBe("awaiting_admin");
+
+    await handleUpdate(adminMessage(String(REGULAR)), deps);
+
+    expect(store.grantedAdmins).toContain(REGULAR);
+    expect(store.users.get(ADMIN)?.state).toBe("idle");
+    expect(api.lastScreen.text).toContain(`Granted admin access to ${REGULAR}`);
+    // The keyboard is static: the new admin has to redraw it themselves.
+    expect(
+      api.sent.some(
+        (m) => m.chatId === REGULAR && m.text.includes("You are now an admin"),
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses a grant for an id that has never started the bot", async () => {
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+    await handleUpdate(adminTap("ap:add"), deps);
+
+    await handleUpdate(adminMessage("999999999"), deps);
+
+    expect(store.grantedAdmins).toHaveLength(0);
+    expect(api.lastScreen.text).toContain("has not started this bot");
+    // Still waiting, so a corrected id can be sent without starting over.
+    expect(store.users.get(ADMIN)?.state).toBe("awaiting_admin");
+  });
+
+  it("asks for a numeric id when the grant text is not one", async () => {
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+    await handleUpdate(adminTap("ap:add"), deps);
+
+    await handleUpdate(adminMessage("not-a-number"), deps);
+
+    expect(store.grantedAdmins).toHaveLength(0);
+    expect(api.lastScreen.text).toContain("not a Telegram ID");
+    expect(store.users.get(ADMIN)?.state).toBe("awaiting_admin");
+  });
+
+  it("says so when the id is already a super admin", async () => {
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+    await handleUpdate(adminTap("ap:add"), deps);
+
+    await handleUpdate(adminMessage(String(ADMIN)), deps);
+
+    expect(store.grantedAdmins).toHaveLength(0);
+    expect(api.lastScreen.text).toContain("already a super admin");
+    expect(store.users.get(ADMIN)?.state).toBe("idle");
+  });
+
+  it("lists every admin and revokes a granted one", async () => {
+    store.grantedAdmins = [REGULAR];
+    await startAs(REGULAR);
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+    await handleUpdate(adminTap("ap:admins"), deps);
+
+    expect(api.lastScreen.text).toContain(`<code>${ADMIN}</code> — super admin`);
+    expect(api.lastScreen.text).toContain(`<code>${REGULAR}</code> — admin`);
+    expect(api.buttons()).toContain(`ap:rm:${REGULAR}`);
+
+    await handleUpdate(adminTap(`ap:rm:${REGULAR}`), deps);
+
+    expect(store.grantedAdmins).not.toContain(REGULAR);
+    expect(api.lastScreen.text).toContain(`Removed admin access from ${REGULAR}`);
+    expect(api.buttons()).not.toContain(`ap:rm:${REGULAR}`);
+  });
+
+  it("does not remove a super admin from the chat", async () => {
+    await adminStartIn();
+    await handleUpdate(adminMessage("/admin"), deps);
+
+    await handleUpdate(adminTap(`ap:rm:${ADMIN}`), deps);
+
+    expect(store.grantedAdmins).toHaveLength(0);
+    expect(api.lastScreen.text).toContain("cannot be removed here");
+  });
 });
 
 describe("settings", () => {
@@ -1417,7 +1595,18 @@ describe("card retrieval", () => {
     expect(cards.calls).toHaveLength(0);
   });
 
-  it("sends the code, then delivers the card and charges for it", async () => {
+  it("sends the code, then delivers the provider's original PDF and charges for it", async () => {
+    cards.verifyResult = {
+      outcome: "verified",
+      format: "pdf",
+      pdf: await PDFDocument.create().then((doc) => {
+        doc.addPage([242.645, 153.071]);
+        return doc.save().then((bytes) => Buffer.from(bytes));
+      }),
+      filename: "Fayda-1234567890123456.pdf",
+      remainingPoints: 496,
+    };
+
     await startIn("en");
     store.users.get(CHAT)!.points = 3;
 
@@ -1430,16 +1619,18 @@ describe("card retrieval", () => {
 
     await handleUpdate(message("123456"), deps);
 
-    // The FAN is verified through the JSON endpoint — the PDF one refuses a FAN
-    // with "finNumber is required" — and the card is rendered here from the
-    // identity it returns.
-    expect(cards.calls.find((c) => c.method === "verifyOtp")?.format).toBe("json");
+    // The default format is "PDF mirror", so the PDF verify endpoint is used —
+    // the provider's own document goes out unchanged, not an A4 sheet rendered
+    // here. Requesting the JSON endpoint too would spend a second point.
+    expect(cards.calls.find((c) => c.method === "verifyOtp")?.format).toBe("pdf");
 
-    // The document itself, not a link to one.
+    // The document itself, under the provider's own filename.
     expect(api.documents).toHaveLength(1);
-    expect(api.documents[0]?.filename).toBe("fayda-printable.pdf");
+    expect(api.documents[0]?.filename).toBe("Fayda-1234567890123456.pdf");
     expect(api.documents[0]?.bytes.toString()).toContain("%PDF");
     expect(api.documents[0]?.caption).toContain("Points used: 1");
+    // The PDF carries no identity fields, so there is no rendered card image.
+    expect(api.photos).toHaveLength(0);
 
     expect(await store.getBalance(CHAT)).toBe(2);
     expect(store.users.get(CHAT)?.state).toBe("idle");
@@ -1452,10 +1643,11 @@ describe("card retrieval", () => {
   });
 
   /**
-   * The customer gets the card twice: the printable PDF for paper, and the same
-   * card as a picture — front and back — that is easy to forward. The image
-   * comes second, so a card already delivered as a document is never withheld
-   * because the picture failed.
+   * The printable format gets the card twice: the A4 sheet for paper, and the
+   * same card as a picture — front and back — that is easy to forward. The
+   * image comes second, so a card already delivered as a document is never
+   * withheld because the picture failed. Only the printable format has
+   * identity fields to draw; the original PDF is delivered as-is.
    */
   it("follows the printable PDF with the card as a front-and-back image", async () => {
     cards.verifyResult = {
@@ -1466,6 +1658,7 @@ describe("card retrieval", () => {
     };
 
     await startIn("en");
+    store.users.get(CHAT)!.downloadType = "printable";
     store.users.get(CHAT)!.points = 3;
 
     await handleUpdate(message("📱 OTP 1 ⭐"), deps);

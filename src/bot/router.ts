@@ -175,6 +175,11 @@ const CB = {
   adminPayments: "ap:pays",
   adminUsers: "ap:users",
   adminPost: "ap:post",
+  /** Super-admin only: grant access to one more person. */
+  adminAdd: "ap:add",
+  /** Super-admin only: list every admin, with a remove button per granted one. */
+  adminList: "ap:admins",
+  adminRemove: (telegramId: number) => `ap:rm:${telegramId}`,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -258,16 +263,24 @@ type Action =
   | "upload_pdf"
   | "buy_points"
   | "my_points"
-  | "settings";
+  | "settings"
+  | "admin";
 
-function mainKeyboard(lang: Lang): ReplyKeyboard {
+/**
+ * The persistent keyboard. The admin row is appended only for an admin, so a
+ * customer never sees an operator control — and a just-granted admin gets it
+ * on the next message that redraws the keyboard.
+ */
+function mainKeyboard(lang: Lang, admin = false): ReplyKeyboard {
   const c = t(lang);
-  return [
+  const rows: ReplyKeyboard = [
     [c.btnOtp1, c.btnOtp2],
     [c.btnScreenshot, c.btnOtp3],
     [c.btnBuyPoints, c.btnMyPoints],
     [c.btnUploadPdf, c.btnSettings],
   ];
+  if (admin) rows.push([c.btnAdmin]);
+  return rows;
 }
 
 /**
@@ -293,6 +306,7 @@ const LABEL_ACTIONS: Map<string, Action> = (() => {
       [c.btnBuyPoints, "buy_points"],
       [c.btnMyPoints, "my_points"],
       [c.btnSettings, "settings"],
+      [c.btnAdmin, "admin"],
     ];
     for (const [label, action] of pairs) map.set(label.trim(), action);
   }
@@ -437,7 +451,7 @@ async function onMessage(message: TgMessage, deps: BotDeps): Promise<void> {
 
   // Also before the language gate, and for the same reason: this is the number
   // an operator was asked for, mid-decision.
-  if (user.state === "awaiting_grant" && deps.adminIds.includes(user.telegramId)) {
+  if (user.state === "awaiting_grant" && (await isAdmin(deps, user.telegramId))) {
     return onGrantSubmitted(deps, user, user.language ?? "en", text);
   }
 
@@ -515,6 +529,8 @@ async function onMessage(message: TgMessage, deps: BotDeps): Promise<void> {
       return onOtpSubmitted(deps, user, lang, text);
     case "awaiting_post":
       return onPostSubmitted(deps, user, lang, text);
+    case "awaiting_admin":
+      return onAdminAddSubmitted(deps, target, user, lang, text);
     case "awaiting_upload":
       // Reached with text, not a file — the file path above did not match.
       return home(deps, user, lang, c.uploadWrongType);
@@ -530,7 +546,10 @@ async function onMessage(message: TgMessage, deps: BotDeps): Promise<void> {
 /** Sends a message and (re)draws the persistent keyboard under it. */
 async function home(deps: BotDeps, user: BotUser, lang: Lang, text: string): Promise<void> {
   try {
-    await deps.api.sendMessage(user.chatId, text, { replyKeyboard: mainKeyboard(lang) });
+    // Read per message rather than cached on BotUser: a grant made a moment
+    // ago must draw the Admin button, and a revoked one must stop drawing it.
+    const admin = await isAdmin(deps, user.telegramId);
+    await deps.api.sendMessage(user.chatId, text, { replyKeyboard: mainKeyboard(lang, admin) });
   } catch (error) {
     if (error instanceof BotApiError && error.isUnreachableChat) {
       await deps.store.markBlocked(user.telegramId);
@@ -611,6 +630,10 @@ async function runAction(
 
     case "settings": {
       return screen(deps, target, user.telegramId, c.settingsPrompt, settingsKeyboard(lang));
+    }
+
+    case "admin": {
+      return showAdminPanel(deps, target, user);
     }
   }
 }
@@ -950,15 +973,20 @@ async function onOtpSubmitted(
   await deps.api.sendChatAction(user.chatId, "upload_document");
   await home(deps, user, lang, c.otpVerifying);
 
+  // Which verify endpoint this code uses is decided by the customer's chosen
+  // download format, not per attempt: a successful verify costs a point and
+  // the two endpoints are separate verifications, so asking for both would
+  // spend two points for one card. "Printable Card" builds the A4 sheet here
+  // from identity fields (JSON); every other format delivers the provider's
+  // own PDF, which is the document people actually want to keep.
+  const wantsPrintable = user.downloadType === "printable";
   const result = await deps.cards.verifyOtp({
     fan,
     otp: code,
     session: session.providerRef,
-    // This bot signs in with a FAN, and the card is always fetched as
-    // structured JSON and rendered here, whatever download type was chosen.
     // Both verify endpoints demand a 12-digit finNumber the docs omit; the
     // client derives it from the FAN (see card.ts).
-    format: "json",
+    format: wantsPrintable ? "json" : "pdf",
   });
 
   if (result.outcome === "unavailable") {
@@ -1044,12 +1072,13 @@ async function onOtpSubmitted(
           })
         : c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance });
 
+    const admin = await isAdmin(deps, user.telegramId);
     await deps.api.sendDocument(
       user.chatId,
       { bytes, filename },
       {
         caption,
-        replyKeyboard: mainKeyboard(lang),
+        replyKeyboard: mainKeyboard(lang, admin),
       },
     );
 
@@ -1397,7 +1426,7 @@ async function onAdminDecision(
   target: Target,
   user: BotUser,
 ): Promise<void> {
-  if (!deps.adminIds.includes(user.telegramId)) return;
+  if (!(await isAdmin(deps, user.telegramId))) return;
 
   const approve = data.startsWith("adm:ok:");
   const purchaseId = data.slice("adm:ok:".length);
@@ -1426,7 +1455,16 @@ async function onAdminDecision(
 }
 
 /** Whether this Telegram id may review payments and post to everyone. */
-function isAdmin(deps: BotDeps, telegramId: number): boolean {
+function isAdmin(deps: BotDeps, telegramId: number): Promise<boolean> {
+  return deps.store.isAdmin(telegramId, deps.adminIds);
+}
+
+/**
+ * The bootstrap admins from `ADMIN_TELEGRAM_IDS`. Only these may grant or
+ * revoke admin access: a granted admin can operate the bot but cannot grow the
+ * operator list, which keeps a compromised or mistaken grant contained.
+ */
+function isSuperAdmin(deps: BotDeps, telegramId: number): boolean {
   return deps.adminIds.includes(telegramId);
 }
 
@@ -1443,7 +1481,7 @@ function buttonLabel(text: string, max: number): string {
  * an operator who has never set a language must still be able to open it.
  */
 async function showAdminPanel(deps: BotDeps, target: Target, user: BotUser): Promise<void> {
-  if (!isAdmin(deps, user.telegramId)) {
+  if (!(await isAdmin(deps, user.telegramId))) {
     return screen(deps, target, user.telegramId, "That command is for administrators.");
   }
 
@@ -1454,8 +1492,10 @@ async function showAdminPanel(deps: BotDeps, target: Target, user: BotUser): Pro
     deps.store.userSummary(),
   ]);
 
+  const superAdmin = isSuperAdmin(deps, user.telegramId);
   const lines = [
     "<b>Admin panel</b>",
+    superAdmin ? "Role: <b>super admin</b>" : "Role: <b>admin</b>",
     "",
     `Users: <b>${summary.users}</b>`,
     `Total user points: <b>${summary.points}</b>`,
@@ -1476,6 +1516,10 @@ async function showAdminPanel(deps: BotDeps, target: Target, user: BotUser): Pro
     ]);
   }
   keyboard.push([{ text: "📣 Post to all users", callback_data: CB.adminPost }]);
+  if (superAdmin) {
+    keyboard.push([{ text: "➕ Add admin", callback_data: CB.adminAdd }]);
+    keyboard.push([{ text: "👑 Admins", callback_data: CB.adminList }]);
+  }
   keyboard.push([{ text: "✖️ Close", callback_data: CB.menu }]);
 
   await screen(deps, target, user.telegramId, lines.join("\n"), keyboard);
@@ -1487,7 +1531,7 @@ async function showAdminPanel(deps: BotDeps, target: Target, user: BotUser): Pro
  * chat anyway — the total is the number that matters, the list is a sample.
  */
 async function showUserPoints(deps: BotDeps, target: Target, user: BotUser): Promise<void> {
-  if (!isAdmin(deps, user.telegramId)) {
+  if (!(await isAdmin(deps, user.telegramId))) {
     return screen(deps, target, user.telegramId, "That command is for administrators.");
   }
 
@@ -1526,7 +1570,7 @@ async function showUserPoints(deps: BotDeps, target: Target, user: BotUser): Pro
  * support chat can still decide a payment.
  */
 async function showPendingPayments(deps: BotDeps, target: Target, user: BotUser): Promise<void> {
-  if (!isAdmin(deps, user.telegramId)) {
+  if (!(await isAdmin(deps, user.telegramId))) {
     return screen(deps, target, user.telegramId, "That command is for administrators.");
   }
 
@@ -1557,6 +1601,153 @@ async function showPendingPayments(deps: BotDeps, target: Target, user: BotUser)
   );
 }
 
+/**
+ * Every operator, super admins first, with a remove button for each granted
+ * one. The environment admins get no remove button: they are a deployment
+ * fact, not a row this bot can delete.
+ */
+async function showAdminList(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  note?: string,
+): Promise<void> {
+  if (!isSuperAdmin(deps, user.telegramId)) {
+    return screen(deps, target, user.telegramId, "Only a super admin can manage admins.");
+  }
+
+  const granted = await deps.store.listGrantedAdmins();
+  const removable = granted.filter((entry) => !deps.adminIds.includes(entry.telegramId));
+  const lines = ["<b>Admins</b>", ""];
+  if (note) lines.push(note, "");
+  for (const id of deps.adminIds) lines.push(`👑 <code>${id}</code> — super admin`);
+  for (const entry of removable) lines.push(`🛠 <code>${entry.telegramId}</code> — admin`);
+
+  const remove: InlineKeyboard = removable.map((entry) => [
+    { text: `❌ Remove ${entry.telegramId}`, callback_data: CB.adminRemove(entry.telegramId) },
+  ]);
+  await screen(deps, target, user.telegramId, lines.join("\n"), [
+    ...remove,
+    [{ text: "➕ Add admin", callback_data: CB.adminAdd }],
+    [{ text: "← Back", callback_data: CB.adminPanel }],
+  ]);
+}
+
+/** Asks a super admin for the id to grant, then hands off to `onAdminAddSubmitted`. */
+async function startAdminAdd(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  lang: Lang,
+): Promise<void> {
+  if (!isSuperAdmin(deps, user.telegramId)) {
+    return screen(deps, target, user.telegramId, "Only a super admin can add admins.");
+  }
+  await deps.store.setState(user.telegramId, "awaiting_admin");
+  await screen(
+    deps,
+    target,
+    user.telegramId,
+    "Send the Telegram ID of the person to make an admin.\n\n" +
+      "They must have started this bot at least once. Send /cancel to stop.",
+    cancelKeyboard(lang),
+  );
+}
+
+/** The id a super admin sent after tapping "Add admin". */
+async function onAdminAddSubmitted(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  lang: Lang,
+  text: string,
+): Promise<void> {
+  // The state could have been set before a change to the allow-list; re-check
+  // rather than trust it.
+  if (!isSuperAdmin(deps, user.telegramId)) {
+    await deps.store.setState(user.telegramId, "idle");
+    return screen(deps, target, user.telegramId, "Only a super admin can add admins.");
+  }
+
+  const telegramId = Number(text.trim());
+  if (!Number.isSafeInteger(telegramId) || telegramId <= 0) {
+    return screen(
+      deps,
+      target,
+      user.telegramId,
+      "That is not a Telegram ID. Send the numeric id, or /cancel.",
+      cancelKeyboard(lang),
+    );
+  }
+
+  if (isSuperAdmin(deps, telegramId)) {
+    await deps.store.setState(user.telegramId, "idle");
+    return showAdminList(deps, target, user, `${telegramId} is already a super admin.`);
+  }
+
+  if (!(await deps.store.hasUser(telegramId))) {
+    return screen(
+      deps,
+      target,
+      user.telegramId,
+      "That person has not started this bot yet, so there is no chat to grant.\n\n" +
+        "Ask them to send /start first, then add them.",
+      cancelKeyboard(lang),
+    );
+  }
+
+  const already = (await deps.store.listGrantedAdmins()).some(
+    (entry) => entry.telegramId === telegramId,
+  );
+  await deps.store.grantAdmin(telegramId, user.telegramId);
+  await deps.store.setState(user.telegramId, "idle");
+
+  if (already) {
+    return showAdminList(deps, target, user, `${telegramId} is already an admin.`);
+  }
+
+  // The grant is a database row; the keyboard is a picture the new admin has
+  // to redraw, so tell them in their own chat how to see the Admin button.
+  try {
+    await deps.api.sendMessage(
+      telegramId,
+      "You are now an admin of this bot.\n\n" +
+        "Send /start to refresh your keyboard, then tap Admin (or send /admin).",
+    );
+  } catch (error) {
+    console.error("admin grant notification failed:", error);
+  }
+
+  return showAdminList(deps, target, user, `Granted admin access to ${telegramId}.`);
+}
+
+/** Removes one granted admin. Environment (super) admins cannot be removed here. */
+async function removeAdmin(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  telegramId: number,
+): Promise<void> {
+  if (!isSuperAdmin(deps, user.telegramId)) {
+    return screen(deps, target, user.telegramId, "Only a super admin can manage admins.");
+  }
+  if (isSuperAdmin(deps, telegramId)) {
+    return showAdminList(
+      deps,
+      target,
+      user,
+      `${telegramId} is a super admin from ADMIN_TELEGRAM_IDS and cannot be removed here.`,
+    );
+  }
+  const removed = await deps.store.revokeAdmin(telegramId);
+  return showAdminList(
+    deps,
+    target,
+    user,
+    removed ? `Removed admin access from ${telegramId}.` : `${telegramId} is not an admin.`,
+  );
+}
+
 /** Asks for the announcement, then hands off to `onPostSubmitted`. */
 async function startAdminPost(
   deps: BotDeps,
@@ -1583,7 +1774,7 @@ async function onPostSubmitted(
 ): Promise<void> {
   // The state could have been set before a change to the allow-list; re-check
   // rather than trust it.
-  if (!isAdmin(deps, user.telegramId)) {
+  if (!(await isAdmin(deps, user.telegramId))) {
     await deps.store.setState(user.telegramId, "idle");
     return home(deps, user, lang, t(lang).unknownInput);
   }
@@ -1616,7 +1807,14 @@ async function onAdminPanelAction(
   target: Target,
   user: BotUser,
 ): Promise<void> {
-  if (!isAdmin(deps, user.telegramId)) return;
+  if (!(await isAdmin(deps, user.telegramId))) return;
+
+  // Removal is per-row: `ap:rm:<id>` is parsed before the exact-match switch.
+  if (data.startsWith("ap:rm:")) {
+    const telegramId = Number(data.slice("ap:rm:".length));
+    if (!Number.isSafeInteger(telegramId) || telegramId <= 0) return;
+    return removeAdmin(deps, target, user, telegramId);
+  }
 
   switch (data) {
     case CB.adminPanel:
@@ -1627,6 +1825,10 @@ async function onAdminPanelAction(
       return showUserPoints(deps, target, user);
     case CB.adminPost:
       return startAdminPost(deps, target, user, user.language ?? "en");
+    case CB.adminAdd:
+      return startAdminAdd(deps, target, user, user.language ?? "en");
+    case CB.adminList:
+      return showAdminList(deps, target, user);
   }
 }
 

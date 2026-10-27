@@ -384,8 +384,9 @@ because a bank redesigned a page — that failure lands in a queue instead. An
 admin taps Approve, is asked how many points, and both the ledger and the
 customer are updated. A second decision on the same payment does nothing.
 
-`ADMIN_TELEGRAM_IDS` is who may decide. It is checked on the callback itself,
-not inferred from which chat the button was tapped in — callback data is
+Only an admin may decide — an `ADMIN_TELEGRAM_IDS` super admin, or someone
+granted access from the portal or the chat. It is checked on the callback
+itself, not inferred from which chat the button was tapped in — callback data is
 attacker-controlled, and anyone can send `adm:ok:<id>` to a bot.
 
 ---
@@ -398,18 +399,21 @@ that retrieval is not connected when it is not.
 ```
 tap OTP 1/2/3  → balance checked first, cost named
 send a FAN     → provider sends a code to the phone registered against it
-send the code  → the identity comes back, is rendered as a PDF, and is delivered
-                 as a Telegram document
+send the code  → the provider's original PDF comes back and is delivered
+                 as a Telegram document (or, for "Printable Card", an A4
+                 sheet is rendered from the JSON identity)
 ```
 
-A FAN is verified through the provider's **`/verify-otp-json`** endpoint, and the
-card document is rendered here from the identity it returns (photo and QR
-included). Although the published docs describe a `{ otp, fanNumber, session }`
-body, the live API refuses that with "finNumber is required" (on both
-`/verify-otp` and `/verify-otp-json`). The bot only ever collects a 16-digit FAN,
-so the client derives the required 12-digit `finNumber` from it — the FAN's last
-12 digits — which the live endpoint accepts. `format` to `verifyOtp` stays
-`"json"`.
+A FAN is verified through the endpoint that matches the chosen download format:
+**`/verify-otp`** for the provider's original PDF (the default, and every format
+except "Printable Card"), or **`/verify-otp-json`** when the A4 printable sheet
+is wanted, which is rendered here from the identity fields (photo and QR
+included). Each successful verify costs a point, so the two are never both
+called for the same code. Although the published docs describe a
+`{ otp, fanNumber, session }` body, the live API refuses that with "finNumber is
+required" (on both endpoints). The bot only ever collects a 16-digit FAN, so the
+client derives the required 12-digit `finNumber` from it — the FAN's last 12
+digits — which the live endpoint accepts.
 
 Three things about it are deliberate:
 
@@ -463,8 +467,9 @@ spend `POINTS_PER_PRINT` points, and file it as a pending card job for an admin
 to see and mark delivered in the admin portal below. Turning an *uploaded* file
 into a printable card — compositing it onto a background template — is not
 built, and is not planned: reproducing the card's security background is
-forgery whoever asks for it. The OTP flow above needs none of that: it renders
-the document from the identity fields the provider's verify endpoint returns.
+forgery whoever asks for it. The OTP flow above needs none of that: it delivers
+the provider's own PDF, or — for the "Printable Card" format — renders an A4
+sheet from the identity fields the verify endpoint returns.
 
 ---
 
@@ -473,28 +478,37 @@ the document from the identity fields the provider's verify endpoint returns.
 A plain web page at **`/admin`**, gated by Telegram's Login Widget rather than
 a password: whoever runs a payment or upload review is already identified to
 Telegram, so reusing that avoids a second credential to leak. Anyone in
-`ADMIN_TELEGRAM_IDS`, or granted from inside the portal itself, can sign in and:
+`ADMIN_TELEGRAM_IDS`, or granted from the portal or the bot itself, can sign in
+and:
 
 - approve or reject a pending payment (same effect as tapping the button in
   chat — this is the same decision, from a screen instead of a phone)
 - see uploaded card jobs and open the image or PDF a customer sent, streamed
   through the server so a browser is never handed the bot token
 - mark a job delivered once the card has been produced and sent
-- edit the price per point, the CBE and Telebirr receiving accounts, and grant
-  the portal to another Telegram id
+- edit the price per point and the CBE and Telebirr receiving accounts
 - post an announcement to every user who has started the bot, in one message
   that reports how many it reached
+- add or remove admins, if they are a **super admin**
+
+There are two roles. `ADMIN_TELEGRAM_IDS` are **super admins**: they are a
+deployment fact, cannot be removed from inside the app, and are the only ones
+who may grant or revoke access. Everyone granted later is a regular **admin**,
+held in the `bot_admins` table, and can use the panel and the chat tools but not
+grow the operator list. A grant requires the person to have started the bot
+once, because `bot_admins` refers to `bot_users`.
 
 The same announcement, and the same payment review, are available in chat:
-**`/admin`** opens a panel for anyone in the allow-list. It reports the number of
-users, the points they hold between them, the pending payment and document
-counts, and the card-API account balance (“My points”); its buttons open a
-**Users** list (each person's balance, highest first), the pending-payment
-review queue (each row carrying the usual Approve/Reject buttons), and a
-**Post to all users** flow. The panel is deliberately in English rather than
-translated copy, since its audience is whoever runs the bot; the broadcast text
-is escaped before sending, and a chat that has blocked the bot is marked and
-skipped next time.
+**`/admin`** opens a panel for any admin. It reports the number of users, the
+points they hold between them, the pending payment and document counts, and the
+card-API account balance (“My points”); its buttons open a **Users** list (each
+person's balance, highest first), the pending-payment review queue (each row
+carrying the usual Approve/Reject buttons), and a **Post to all users** flow.
+A super admin also sees **Add admin** and **Admins** (list with a Remove button
+per granted admin). The panel is deliberately in English rather than translated
+copy, since its audience is whoever runs the bot; the broadcast text is escaped
+before sending, and a chat that has blocked the bot is marked and skipped next
+time.
 
 Local setup needs nothing beyond what the bot already requires — signing in
 works off the same `TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_IDS`. On Vercel,
@@ -504,9 +518,9 @@ run migration `0003_admin_portal.sql` (part of the normal `npm run migrate`)
 before the portal is used — it adds the settings and admin-grant tables.
 
 The session cookie is signed, not stored server-side, so revoking someone is
-immediate: removing a Telegram id from `ADMIN_TELEGRAM_IDS` (or the granted
-list) takes effect on their very next request, since membership is re-checked
-every time rather than trusted from the cookie.
+immediate: removing a Telegram id from `ADMIN_TELEGRAM_IDS`, or revoking a
+granted admin, takes effect on their very next request, since membership is
+re-checked every time rather than trusted from the cookie.
 
 Prices and receiving accounts set from the portal override the
 `POINT_PRICE_ETB` / `CBE_ACCOUNT_*` / `TELEBIRR_ACCOUNT_*` environment
