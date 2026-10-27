@@ -207,7 +207,11 @@ Render and Docker run.
 
 `/api/health` reports the commit it is running (`VERCEL_GIT_COMMIT_SHA`). Check
 it after any deploy: a **Redeploy** from the Vercel dashboard reuses the original
-source, so a fix can appear not to work when it was in fact never shipped.
+source, so a fix can appear not to work when it was in fact never shipped. It
+also names where the card API key comes from (`cardKey`: `settings`, `env` or
+`missing`); add `?card=1` to make one short `/balance` call to the card provider
+and report `ok`, `refused` (with the status) or `unreachable` (with the error
+name). Without the parameter the endpoint calls nobody.
 
 ### Why vercel.json uses `builds`
 

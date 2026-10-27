@@ -252,15 +252,23 @@ export function httpCardProvider(
       const bytes = Buffer.from(await response.arrayBuffer());
       if (!response.ok) return { outcome: "rejected", message: messageFrom(bytes, response.status) };
 
+      const contentType = response.headers.get("content-type") ?? "no content type";
       try {
         const body = JSON.parse(bytes.toString("utf8")) as { session?: unknown; phone?: unknown };
-        if (typeof body.session !== "string" || !body.session) return { outcome: "unavailable" };
+        if (typeof body.session !== "string" || !body.session) {
+          // A 200 the client cannot use: without a log the customer is told
+          // "not connected" and nothing anywhere says the provider answered in
+          // an unexpected shape. The body is not logged — it may name the FAN.
+          console.error(`card send-otp: 200 without a session (${contentType})`);
+          return { outcome: "unavailable" };
+        }
         return {
           outcome: "sent",
           session: body.session,
           phone: typeof body.phone === "string" ? body.phone : "",
         };
       } catch {
+        console.error(`card send-otp: expected JSON, got ${contentType}`);
         return { outcome: "unavailable" };
       }
     },
