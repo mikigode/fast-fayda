@@ -1,11 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/*.ts": {
-      "runtime": "@vercel/node@3.2.17",
-      "includeFiles": "assets/**"
+  "builds": [
+    {
+      "src": "api/**/*.ts",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": ["assets/**"]
+      }
     }
-  },
+  ],
   "rewrites": [
     { "source": "/", "destination": "/api/health" },
     { "source": "/health", "destination": "/api/health" },
