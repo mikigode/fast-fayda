@@ -129,4 +129,30 @@ describe("toCardImage", () => {
     expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
     expect(png.length).toBeGreaterThan(1000);
   });
+
+  /**
+   * The serial is printed in the blank strip under the QR. It is part of the
+   * picture the customer forwards, not just the PDF, so an unnumbered image is
+   * a card that cannot be matched to its job.
+   */
+  it("prints the serial in the free strip under the QR code", async () => {
+    const inkIn = async (png: Buffer, x: number, y: number, width: number, height: number): Promise<number> => {
+      const image = await loadImage(png);
+      const canvas = createCanvas(image.width, image.height);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      const { data } = ctx.getImageData(x, y, width, height);
+      let ink = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i]! < 120 && data[i + 1]! < 120 && data[i + 2]! < 120) ink++;
+      }
+      return ink;
+    };
+
+    const numbered = await toCardImage(IDENTITY, 58100);
+    const unnumbered = await toCardImage(IDENTITY);
+
+    expect(await inkIn(numbered, 1900, 688, 320, 32)).toBeGreaterThan(100);
+    expect(await inkIn(unnumbered, 1900, 688, 320, 32)).toBe(0);
+  });
 });

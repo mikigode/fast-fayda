@@ -1,8 +1,50 @@
+import { inflateSync } from "node:zlib";
 import { PDFDocument } from "pdf-lib";
 import { describe, expect, it, vi } from "vitest";
 import type { CardIdentity } from "@/bot/card";
-import { embeddableImageBytes, toPrintable } from "@/bot/printable";
+import { embeddableImageBytes, toIdentityPdf, toPrintable } from "@/bot/printable";
 import { SAMPLE_JPEG_BASE64 } from "./fixtures/sample-jpeg";
+
+/**
+ * Decodes the Flate-compressed content streams, which is where pdf-lib keeps
+ * the text operators. Reading the raw file is not enough: every page stream is
+ * compressed, so an assertion against `pdf.toString()` can only ever see the
+ * binary.
+ */
+function pdfContent(pdf: Buffer): string {
+  const raw = pdf.toString("latin1");
+  const chunks: string[] = [];
+  let from = 0;
+  while (true) {
+    const at = raw.indexOf("stream", from);
+    if (at === -1) break;
+    // Skip the "stream" inside "endstream".
+    if (raw.slice(at - 3, at) === "end") {
+      from = at + "stream".length;
+      continue;
+    }
+    let start = at + "stream".length;
+    if (raw[start] === "\r") start++;
+    if (raw[start] === "\n") start++;
+    const end = raw.indexOf("endstream", start);
+    if (end === -1) break;
+    let chunk = Buffer.from(pdf.subarray(start, end));
+    while (chunk.length && (chunk[chunk.length - 1] === 0x0a || chunk[chunk.length - 1] === 0x0d)) {
+      chunk = chunk.subarray(0, chunk.length - 1);
+    }
+    try {
+      chunks.push(inflateSync(chunk).toString("latin1"));
+    } catch {
+      // Images and other filters are not text; keep them out of the result.
+    }
+    from = end + "endstream".length;
+  }
+  // pdf-lib emits text as hex strings (`<534E...> Tj`); decode them so an
+  // assertion can read the drawn text rather than its byte representation.
+  return chunks
+    .join("\n")
+    .replace(/<([0-9A-Fa-f]+)>/g, (_match, hex: string) => Buffer.from(hex, "hex").toString("latin1"));
+}
 
 /**
  * The printable sheet embeds the holder's photo and QR code with pdf-lib.
@@ -94,5 +136,26 @@ describe("toPrintable", () => {
     } finally {
       errors.mockRestore();
     }
+  });
+
+  it("prints the card's serial on the sheet", async () => {
+    const pdf = await toPrintable(IDENTITY, 58100);
+
+    expect(pdfContent(pdf)).toContain("SN 58100");
+  });
+
+  it("leaves the serial out when none was allocated", async () => {
+    const pdf = await toPrintable(IDENTITY);
+
+    expect(pdfContent(pdf)).not.toContain("SN 58100");
+  });
+});
+
+describe("toIdentityPdf", () => {
+  it("carries the serial into the fallback layout too", async () => {
+    const pdf = await toIdentityPdf(IDENTITY, 58100);
+
+    expect(pdfContent(pdf)).toContain("SN:");
+    expect(pdfContent(pdf)).toContain("58100");
   });
 });

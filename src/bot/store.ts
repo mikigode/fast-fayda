@@ -127,6 +127,12 @@ export type BotStore = {
   getCardJob(id: string): Promise<CardJobRow | null>;
   /** Marks a job handled. Idempotent — a second call on an already-delivered job does nothing. */
   markCardJobDelivered(id: string): Promise<boolean>;
+  /**
+   * Allocates the next printable-card serial. Postgres hands these out
+   * atomically, so two cards produced at the same moment cannot share one;
+   * the first is 58100.
+   */
+  nextCardSerial(): Promise<number>;
 
   // ---- OTP sessions ------------------------------------------------------
   /**
@@ -683,6 +689,18 @@ export const dbStore: BotStore = {
         [id],
       );
       return updated > 0;
+    });
+  },
+
+  async nextCardSerial() {
+    return withDb(async (q) => {
+      // The migration creates this sequence. Creating it here as well means a
+      // deployment that has not had `npm run migrate` run against it yet still
+      // numbers its cards, rather than producing them without an SN — the
+      // serverless entry point deliberately does not migrate on cold start.
+      await q.run("create sequence if not exists card_serial_seq start with 58100");
+      const row = await q.need<{ serial: string }>(`select nextval('card_serial_seq') as serial`);
+      return Number(row.serial);
     });
   },
 

@@ -129,6 +129,15 @@ const ADDRESS_ZONE_EN: Line = { x: 1388, baseline: 446, w: 420 };
 const ADDRESS_WOREDA_AM: Line = { x: 1388, baseline: 485, w: 420 };
 const ADDRESS_WOREDA_EN: Line = { x: 1388, baseline: 523, w: 420 };
 const FIN: Line = { x: 1538, baseline: 684, w: 340 };
+/**
+ * The serial number, in the blank strip directly under the QR code.
+ *
+ * This is the back's only free area: the QR ends at y675 and the return
+ * message begins around y727, so the baseline sits between them. The serial is
+ * printed here rather than in the page margin because the card is what is
+ * forwarded and cut out — the number has to travel with it.
+ */
+const SERIAL: Line = { x: 1912, baseline: 716, w: 620 };
 
 /** The design's own type sizes, shared by every field of the same kind. */
 const SIZE_NAME = 37;
@@ -139,6 +148,8 @@ const SIZE_FAN = 28;
 const SIZE_ISSUE = 23;
 /** One size for the whole back, so its values all match. */
 const SIZE_BACK = 32;
+/** The serial is a small print, tucked under the QR rather than a card field. */
+const SIZE_SERIAL = 28;
 
 /**
  * The faces are bundled, not borrowed from the host.
@@ -478,7 +489,7 @@ function drawBarcode(ctx: Ctx, text: string, box: Box): void {
  * The MIME type is fixed: Telegram needs it on the upload, and a caller that
  * guesses from the bytes would guess wrong about what a PNG is.
  */
-export async function toCardImage(identity: CardIdentity): Promise<Buffer> {
+export async function toCardImage(identity: CardIdentity, serial: number | null = null): Promise<Buffer> {
   const canvas = createCanvas(IMAGE_W, IMAGE_H);
   const ctx = canvas.getContext("2d");
 
@@ -536,6 +547,9 @@ export async function toCardImage(identity: CardIdentity): Promise<Buffer> {
     drawLine(ctx, level.english, slot[1], LATIN, SIZE_BACK);
   }
   drawLine(ctx, identity.fin, FIN, LATIN, SIZE_BACK, 700);
+  // Allocated per printable card; absent when numbering failed, which must not
+  // stop the card itself from being drawn.
+  if (serial !== null) drawLine(ctx, `SN ${serial}`, SERIAL, LATIN, SIZE_SERIAL, 700);
 
   return canvas.encodeSync("png");
 }

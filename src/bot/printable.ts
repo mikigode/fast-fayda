@@ -11,10 +11,10 @@ import type { CardIdentity } from "./card";
  * paper is the card at card size. This flow uses `/verify-otp-json` and builds
  * the sheet here, rather than re-paginating the provider's document.
  *
- * Pure function of its input: the same identity always produces the same
- * sheet, which keeps a retry and a first attempt identical. Rendering never
- * throws for missing or corrupt images — a card the customer is owed should
- * reach them even when a photo or QR code is unusable.
+ * Pure function of its input: the same identity and serial always produce the
+ * same sheet, which keeps a retry and a first attempt identical. Rendering
+ * never throws for missing or corrupt images — a card the customer is owed
+ * should reach them even when a photo or QR code is unusable.
  */
 
 /** A4 portrait, in PDF points (1/72 inch). */
@@ -91,8 +91,9 @@ function drawCutGuide(page: PDFPage): void {
   });
 }
 
-function drawCaption(page: PDFPage, font: PDFFont, side: "FRONT" | "BACK"): void {
-  page.drawText(`FAYDA CARD - PRINT READY (A4, CR80)  |  ${side}`, {
+function drawCaption(page: PDFPage, font: PDFFont, side: "FRONT" | "BACK", serial: number | null): void {
+  const label = serial === null ? side : `${side}  |  SN ${serial}`;
+  page.drawText(`FAYDA CARD - PRINT READY (A4, CR80)  |  ${label}`, {
     x: 36,
     y: A4_HEIGHT - 36,
     size: 9,
@@ -199,7 +200,7 @@ function drawFields(
   }
 }
 
-export async function toPrintable(identity: CardIdentity): Promise<Buffer> {
+export async function toPrintable(identity: CardIdentity, serial: number | null = null): Promise<Buffer> {
   const sheet = await PDFDocument.create();
   sheet.setProducer("fast-fayda printable");
   const helv = await sheet.embedFont(StandardFonts.Helvetica);
@@ -208,19 +209,19 @@ export async function toPrintable(identity: CardIdentity): Promise<Buffer> {
 
   const front = sheet.addPage([A4_WIDTH, A4_HEIGHT]);
   drawCutGuide(front);
-  drawCaption(front, helv, "FRONT");
+  drawCaption(front, helv, "FRONT", serial);
   drawFront(sheet, front, assets, identity);
 
   const back = sheet.addPage([A4_WIDTH, A4_HEIGHT]);
   drawCutGuide(back);
-  drawCaption(back, helv, "BACK");
-  drawBack(sheet, back, assets, identity);
+  drawCaption(back, helv, "BACK", serial);
+  drawBack(sheet, back, assets, identity, serial);
 
   return Buffer.from(await sheet.save());
 }
 
 /** A one-page text layout, as a last resort when the sheet renderer fails. */
-export async function toIdentityPdf(identity: CardIdentity): Promise<Buffer> {
+export async function toIdentityPdf(identity: CardIdentity, serial: number | null = null): Promise<Buffer> {
   const sheet = await PDFDocument.create();
   sheet.setProducer("fast-fayda printable");
   const helv = await sheet.embedFont(StandardFonts.Helvetica);
@@ -231,6 +232,7 @@ export async function toIdentityPdf(identity: CardIdentity): Promise<Buffer> {
     `Name: ${identity.name.english}`,
     `FAN:  ${identity.fanNumber}`,
     `FIN:  ${identity.fin}`,
+    ...(serial === null ? [] : [`SN:   ${serial}`]),
     `DOB:  ${identity.dateOfBirth.gregorian}`,
     `Gender: ${identity.gender.english}`,
     `Nationality: ${identity.nationality.english}`,
@@ -289,6 +291,7 @@ async function drawBack(
   page: PDFPage,
   assets: SheetAssets,
   identity: CardIdentity,
+  serial: number | null,
 ): Promise<void> {
   const { x: cardX, y: cardY } = cardBox(page);
   const innerX = cardX + 12;
@@ -306,4 +309,17 @@ async function drawBack(
     { label: "Issued", value: identity.issueDate.gregorian },
     { label: "Expires", value: identity.expiryDate.gregorian },
   ], innerX, cardY + CARD_HEIGHT - 12, qrX - innerX - 12);
+
+  // Inside the card, not only in the page caption: once the card is cut out,
+  // the serial has to travel with it. This strip is free — the fields end
+  // above it and the QR sits to its right.
+  if (serial !== null) {
+    page.drawText(`SN ${serial}`, {
+      x: innerX,
+      y: cardY + 10,
+      size: 7,
+      font: assets.helvBold,
+      color: DARK,
+    });
+  }
 }

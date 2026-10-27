@@ -1041,18 +1041,32 @@ async function onOtpSubmitted(
     }
   }
 
+  // Only the printable card this bot draws gets a serial. The provider's
+  // original PDF is passed through untouched and keeps whatever numbering the
+  // provider already printed in it.
+  let serial: number | null = null;
+  if (result.format === "json") {
+    try {
+      serial = await deps.store.nextCardSerial();
+    } catch (error) {
+      // The card is already paid for, upstream and here. A numbering failure
+      // must cost the card its SN, never the customer their delivery.
+      console.error("card serial allocation failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
   try {
     // A JSON verify delivers a structured identity, from which the print sheet
     // is rendered here; a PDF verify hands the provider's document through.
     const filename = result.format === "json" ? "fayda-printable.pdf" : result.filename;
     const bytes =
       result.format === "json"
-        ? await toPrintable(result.identity).catch((error) => {
+        ? await toPrintable(result.identity, serial).catch((error) => {
             // A card that exists should always reach the customer; if the
             // print layout cannot be built, hand over the bare identity fields
             // rather than nothing.
             console.error("printable render failed:", error instanceof Error ? error.message : error);
-            return toIdentityPdf(result.identity);
+            return toIdentityPdf(result.identity, serial);
           })
         : result.pdf;
 
@@ -1061,7 +1075,8 @@ async function onOtpSubmitted(
     // returns only the document, so it keeps the plain caption.
     const caption =
       result.format === "json"
-        ? `${c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance })}\n\n` +
+        ? `${c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance })}` +
+          `${serial === null ? "" : `\nSN: ${serial}`}\n\n` +
           c.otpIdentitySummary({
             name: result.identity.name.english || result.identity.name.amharic,
             fan: result.identity.fanNumber,
@@ -1088,7 +1103,7 @@ async function onOtpSubmitted(
     // render or upload must not read as a lost card to the catch below.
     if (result.format === "json") {
       try {
-        const image = await toCardImage(result.identity);
+        const image = await toCardImage(result.identity, serial);
         await deps.api.sendPhoto(
           user.chatId,
           { bytes: image, filename: CARD_IMAGE_FILENAME },

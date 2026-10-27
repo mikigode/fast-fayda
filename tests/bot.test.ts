@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PDFDocument } from "pdf-lib";
 import type { BotApi, InlineKeyboard } from "@/bot/api";
 import { BotApiError } from "@/bot/api";
@@ -203,6 +203,18 @@ class FakeStore implements BotStore {
     const id = `job-${this.cardJobs.length + 1}`;
     this.cardJobs.push({ id, telegramId, source, pointsSpent: points, status, telegramFileId });
     return { id, balance: user.points };
+  }
+
+  /** Serials handed out, starting where production does. */
+  cardSerials: number[] = [];
+  /** Set to make allocation fail, which must not cost the customer their card. */
+  failNextCardSerial = false;
+
+  async nextCardSerial() {
+    if (this.failNextCardSerial) throw new Error("card_serial_seq unavailable");
+    const serial = 58100 + this.cardSerials.length;
+    this.cardSerials.push(serial);
+    return serial;
   }
 
   async pendingCardJobs() {
@@ -1629,6 +1641,10 @@ describe("card retrieval", () => {
     expect(api.documents[0]?.filename).toBe("Fayda-1234567890123456.pdf");
     expect(api.documents[0]?.bytes.toString()).toContain("%PDF");
     expect(api.documents[0]?.caption).toContain("Points used: 1");
+    // The provider's document is passed through untouched: no serial of ours
+    // is allocated or printed on it.
+    expect(store.cardSerials).toHaveLength(0);
+    expect(api.documents[0]?.caption).not.toContain("SN:");
     // The PDF carries no identity fields, so there is no rendered card image.
     expect(api.photos).toHaveLength(0);
 
@@ -1675,6 +1691,10 @@ describe("card retrieval", () => {
     expect(api.photos[0]?.bytes.readUInt32BE(16)).toBe(2600);
     expect(api.photos[0]?.bytes.readUInt32BE(20)).toBe(800);
     expect(api.photos[0]?.caption).toContain("Front & back");
+    // The first printable card is numbered 58100, and the number is repeated
+    // in the delivery caption so it can be matched to the paper card.
+    expect(store.cardSerials).toEqual([58100]);
+    expect(api.documents[0]?.caption).toContain("SN: 58100");
   });
 
   it("renders a printable sheet when the download type is printable", async () => {
@@ -1713,6 +1733,70 @@ describe("card retrieval", () => {
     expect(caption).toContain("1988-05-09");
     expect(caption).toContain("0912345678");
     expect(caption).toContain("Remaining points: 496");
+  });
+
+  /**
+   * A serial identifies a produced card, so it is allocated once per printable
+   * delivery and never repeats. The sequence starts at 58100; these two runs
+   * prove the router asks for the next one rather than rebuilding the same.
+   */
+  it("numbers each printable card in sequence", async () => {
+    cards.verifyResult = {
+      outcome: "verified",
+      format: "json",
+      remainingPoints: 496,
+      identity: IDENTITY,
+    };
+
+    await startIn("en");
+    store.users.get(CHAT)!.downloadType = "printable";
+    store.users.get(CHAT)!.points = 5;
+
+    const deliver = async () => {
+      await handleUpdate(message("📱 OTP 1 ⭐"), deps);
+      await handleUpdate(message("1234567890123456"), deps);
+      await handleUpdate(message("123456"), deps);
+    };
+
+    await deliver();
+    await deliver();
+
+    expect(store.cardSerials).toEqual([58100, 58101]);
+    expect(api.documents).toHaveLength(2);
+    expect(api.documents[0]?.caption).toContain("SN: 58100");
+    expect(api.documents[1]?.caption).toContain("SN: 58101");
+  });
+
+  /**
+   * The serial is a label, not a precondition. If the sequence cannot be read,
+   * the card has still been paid for twice over and must go out unnumbered.
+   */
+  it("still delivers a printable card when no serial can be allocated", async () => {
+    cards.verifyResult = {
+      outcome: "verified",
+      format: "json",
+      remainingPoints: 496,
+      identity: IDENTITY,
+    };
+    store.failNextCardSerial = true;
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await startIn("en");
+      store.users.get(CHAT)!.downloadType = "printable";
+      store.users.get(CHAT)!.points = 3;
+
+      await handleUpdate(message("📱 OTP 1 ⭐"), deps);
+      await handleUpdate(message("1234567890123456"), deps);
+      await handleUpdate(message("123456"), deps);
+
+      expect(api.documents).toHaveLength(1);
+      expect(api.photos).toHaveLength(1);
+      expect(api.documents[0]?.caption).not.toContain("SN:");
+      expect(errors.mock.calls.flat().join(" ")).toContain("card serial allocation failed");
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("hands the provider back the session exactly as it was given", async () => {
