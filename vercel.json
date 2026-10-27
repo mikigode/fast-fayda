@@ -1,20 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "builds": [
-    {
-      "src": "api/**/*.ts",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": ["assets/**"]
-      }
-    }
-  ],
-  "routes": [
-    { "src": "/", "dest": "/api/health" },
-    { "src": "/health", "dest": "/api/health" },
-    { "src": "/webhook", "dest": "/api/webhook" },
-    { "src": "/admin", "dest": "/api/admin" },
-    { "src": "/admin/.*", "dest": "/api/admin" },
-    { "src": "/api/(.*)", "dest": "/api/$1" }
+  "rewrites": [
+    { "source": "/", "destination": "/api/health" },
+    { "source": "/health", "destination": "/api/health" },
+    { "source": "/webhook", "destination": "/api/webhook" },
+    { "source": "/admin", "destination": "/api/admin" },
+    { "source": "/admin/:path*", "destination": "/api/admin" }
   ]
 }
