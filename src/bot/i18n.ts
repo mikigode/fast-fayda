@@ -134,6 +134,8 @@ type Copy = {
   // ---- cards ---------------------------------------------------------------
   otpSelected: (slot: number) => string;
   otpUnavailable: (admin: string) => string;
+  /** The provider did not answer, or answered in a shape we cannot read. */
+  otpNotAnswered: (admin: string) => string;
   /** Names the cost before a FAN is asked for, so nobody is surprised by it. */
   otpAsk: (args: { slot: number; points: number }) => string;
   otpSending: string;
@@ -425,6 +427,10 @@ const en: Copy = {
   otpUnavailable: (admin) =>
     "Card retrieval is not connected on this deployment yet.\n\n" +
     `Contact ${admin} to have it enabled.`,
+  otpNotAnswered: (admin) =>
+    "Card retrieval did not answer just now.\n\n" +
+    "Please try again in a few minutes. If it keeps happening, contact " +
+    `${admin} and say roughly when it happened.`,
   uploadUnavailable: (admin) =>
     "Card rendering is not connected on this deployment yet.\n\n" +
     `Contact ${admin} to have it enabled.`,
@@ -682,6 +688,9 @@ const am: Copy = {
   otpCardImage: "🖼️ የፊት እና የጀርባ ምስል — ተመሳሳዩ መታወቂያ በምስል።",
   otpUnavailable: (admin) =>
     "የመታወቂያ ማውጣት አገልግሎት በዚህ ላይ ገና አልተገናኘም።\n\n" + `ለማስጀመር ${admin} ያግኙ።`,
+  otpNotAnswered: (admin) =>
+    "የመታወቂያ ማውጣት አገልግሎት አሁን ምላሽ አልሰጠም።\n\n" +
+    `እባክዎ ከጥቂት ደቂቃዎች በኋላ እንደገና ይሞክሩ። ችግሩ ከቀጠለ ${admin} ያግኙ።`,
   uploadUnavailable: (admin) =>
     "የመታወቂያ ህትመት አገልግሎት በዚህ ላይ ገና አልተገናኘም።\n\n" + `ለማስጀመር ${admin} ያግኙ።`,
   uploadAsk: (points) =>

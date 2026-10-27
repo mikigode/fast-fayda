@@ -254,19 +254,28 @@ export function httpCardProvider(
 
       const contentType = response.headers.get("content-type") ?? "no content type";
       try {
-        const body = JSON.parse(bytes.toString("utf8")) as { session?: unknown; phone?: unknown };
-        if (typeof body.session !== "string" || !body.session) {
-          // A 200 the client cannot use: without a log the customer is told
-          // "not connected" and nothing anywhere says the provider answered in
-          // an unexpected shape. The body is not logged — it may name the FAN.
-          console.error(`card send-otp: 200 without a session (${contentType})`);
-          return { outcome: "unavailable" };
-        }
-        return {
-          outcome: "sent",
-          session: body.session,
-          phone: typeof body.phone === "string" ? body.phone : "",
+        const body = JSON.parse(bytes.toString("utf8")) as {
+          session?: unknown;
+          phone?: unknown;
+          message?: unknown;
         };
+        if (typeof body.session === "string" && body.session) {
+          return {
+            outcome: "sent",
+            session: body.session,
+            phone: typeof body.phone === "string" ? body.phone : "",
+          };
+        }
+        // A 200 with no session is the provider declining in its documented
+        // error shape — an unknown FAN, most often. This used to be reported as
+        // "not connected", which told the customer the deployment was broken
+        // when the number they typed was. The body is never logged: it can name
+        // the FAN.
+        const message =
+          typeof body.message === "string" && body.message.trim() ? body.message.trim() : null;
+        if (message) return { outcome: "rejected", message };
+        console.error(`card send-otp: 200 without a session or a message (${contentType})`);
+        return { outcome: "unavailable" };
       } catch {
         console.error(`card send-otp: expected JSON, got ${contentType}`);
         return { outcome: "unavailable" };

@@ -65,6 +65,20 @@ describe("send-otp", () => {
     });
   });
 
+  it("treats a 200 with a message and no session as a refusal, not an outage", async () => {
+    // The provider answers some declines with 200 and its own wording. Calling
+    // that "not connected" hid a wrong FAN behind a deployment problem.
+    vi.stubGlobal("fetch", async () =>
+      respond(JSON.stringify({ success: false, message: "Unknown FAN." }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(await provider().sendOtp("1234567890123456")).toEqual({
+      outcome: "rejected",
+      message: "Unknown FAN.",
+    });
+  });
+
   it("is unavailable, not rejected, when the network fails", async () => {
     vi.stubGlobal("fetch", async () => {
       throw new Error("ECONNRESET");

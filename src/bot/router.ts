@@ -922,7 +922,7 @@ async function onFanSubmitted(
   const result = await deps.cards.sendOtp(parsed.digits);
   if (result.outcome === "unavailable") {
     await deps.store.setState(user.telegramId, "idle");
-    return home(deps, user, lang, c.otpUnavailable(deps.adminContact));
+    return home(deps, user, lang, c.otpNotAnswered(deps.adminContact));
   }
   if (result.outcome === "rejected") {
     await deps.store.setState(user.telegramId, "idle");
@@ -998,7 +998,7 @@ async function onOtpSubmitted(
     await deps.store.closeOtpSession(session.id, "failed");
     await deps.store.setState(user.telegramId, "idle");
     await notifyAdmins(deps, `OTP verify did not complete for <code>${user.telegramId}</code> — check whether a point was spent upstream.`);
-    return home(deps, user, lang, c.otpUnavailable(deps.adminContact));
+    return home(deps, user, lang, c.otpNotAnswered(deps.adminContact));
   }
 
   if (result.outcome === "rejected") {

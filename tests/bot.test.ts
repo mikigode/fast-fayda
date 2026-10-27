@@ -1584,6 +1584,20 @@ describe("card retrieval", () => {
     expect(cards.calls).toHaveLength(0);
   });
 
+  it("says the card service did not answer when the code cannot be sent", async () => {
+    cards.sendOtpResult = { outcome: "unavailable" };
+    await startIn("en");
+    store.users.get(CHAT)!.points = 3;
+    await handleUpdate(message("📱 OTP 2"), deps);
+    await handleUpdate(message("1234567890123456"), deps);
+
+    // Not "not connected": a provider that timed out has not told us anything
+    // about the deployment's configuration.
+    expect(api.lastScreen.text).toContain("did not answer");
+    expect(api.lastScreen.text).not.toContain("not connected");
+    expect(store.users.get(CHAT)?.state).toBe("idle");
+  });
+
   it("does not store the FAN in plain text anywhere", async () => {
     await startIn("en");
     store.users.get(CHAT)!.points = 3;
@@ -1868,6 +1882,10 @@ describe("card retrieval", () => {
     expect(store.users.get(CHAT)?.state).toBe("idle");
     const warned = api.sent.find((m) => m.chatId === -100_200);
     expect(warned?.text).toContain("check whether a point was spent");
+    // A provider that did not answer is not a deployment that is not
+    // configured; telling the customer to "contact the admin to have it
+    // enabled" for a timeout sends them to the wrong place.
+    expect(api.lastScreen.text).toContain("did not answer");
   });
 
   it("warns the admin chat when the upstream balance is running out", async () => {
