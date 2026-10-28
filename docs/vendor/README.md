@@ -18,16 +18,21 @@ content type inspected before anything parses it. A client that calls
 `.json()` unconditionally gets a syntax error from `%PDF-1.4` and reports a
 successful verification as a failure — with the point already spent.
 
-**Never call both verify endpoints for the same OTP.** Each successful verify
-deducts a point. The JSON endpoint returns the same identity as fields instead
-of a rendered document; the bot uses the PDF endpoint for the document and asks
-for JSON only when the customer chose the "Printable Card" format, which is
-rendered here from those fields. One choice is made per code, never both.
+**Calling both verify endpoints costs two points.** Each successful verify
+deducts one. The JSON endpoint returns the same identity as fields instead of a
+rendered document, so the document is fetched through exactly one endpoint: PDF
+by default, JSON for "Printable Card". The bot does make a second, JSON call for
+the PDF flow — but only after the document has been delivered, and only to get
+the fields for the card picture. That is one extra point upstream per PDF
+delivery; it is never what produces the document, and if it fails the picture
+falls back to the PDF's own pages.
 
-The PDF is also sent as a picture, and that picture is the PDF: PDFium renders
-its pages to a PNG (see `src/bot/pdfImage.ts`) after the document has gone out.
-No identity fields are involved, so no second verify is needed. The JSON flow's
-picture is drawn from the identity instead (`src/bot/cardImage.ts`).
+The PDF is also sent as a picture. When the fields behind the code came back,
+that picture is the designed card (`src/bot/cardImage.ts`, drawn on
+`assets/card-background.png` with the holder's particulars). When they did not —
+an already-used code, an outage — PDFium renders the PDF's pages to a PNG
+instead (see `src/bot/pdfImage.ts`), so a PDF delivery still arrives as a
+picture.
 
 These are third-party documents, reproduced here for reference. They are not
 authored by this project, and they are not a licence — see

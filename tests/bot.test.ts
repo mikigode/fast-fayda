@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PDFDocument } from "pdf-lib";
+import { loadImage } from "@napi-rs/canvas";
 import type { BotApi, InlineKeyboard } from "@/bot/api";
 import { BotApiError } from "@/bot/api";
 import {
@@ -526,6 +527,8 @@ class FakeCards implements CardProvider {
     identity: IDENTITY,
     remainingPoints: 497,
   };
+  /** Scripted answers for one format; anything unset falls back to `verifyResult`. */
+  byFormat: Partial<Record<"pdf" | "json", VerifyOtpResult>> = {};
   /** Every call made, so a test can prove a point was not spent twice. */
   calls: { method: string; fan?: string; otp?: string; session?: string; format?: "pdf" | "json" }[] = [];
 
@@ -536,7 +539,7 @@ class FakeCards implements CardProvider {
 
   async verifyOtp({ fan, otp, session, format }: { fan: string; otp: string; session: string; format: "pdf" | "json" }) {
     this.calls.push({ method: "verifyOtp", fan, otp, session, format });
-    return this.verifyResult;
+    return this.byFormat[format] ?? this.verifyResult;
   }
 
   async balance() {
@@ -1632,6 +1635,9 @@ describe("card retrieval", () => {
       filename: "Fayda-1234567890123456.pdf",
       remainingPoints: 496,
     };
+    // The picture wants the identity fields, so a second verify is attempted
+    // after the document. The provider refuses a code it has already accepted.
+    cards.byFormat.json = { outcome: "rejected", message: "OTP already used." };
 
     await startIn("en");
     store.users.get(CHAT)!.points = 3;
@@ -1647,8 +1653,9 @@ describe("card retrieval", () => {
 
     // The default format is "PDF mirror", so the PDF verify endpoint is used —
     // the provider's own document goes out unchanged, not an A4 sheet rendered
-    // here. Requesting the JSON endpoint too would spend a second point.
-    expect(cards.calls.find((c) => c.method === "verifyOtp")?.format).toBe("pdf");
+    // here. The picture then asks the JSON endpoint for the same code once.
+    const verifies = cards.calls.filter((c) => c.method === "verifyOtp");
+    expect(verifies.map((c) => c.format)).toEqual(["pdf", "json"]);
 
     // The document itself, under the provider's own filename.
     expect(api.documents).toHaveLength(1);
@@ -1659,15 +1666,16 @@ describe("card retrieval", () => {
     // is allocated or printed on it.
     expect(store.cardSerials).toHaveLength(0);
     expect(api.documents[0]?.caption).not.toContain("SN:");
-    // The document is also sent as a picture. It carries no identity fields to
-    // draw the designed card from, so its own pages are rendered instead — one
-    // verify, one point, both outputs.
+    // With the code already spent, there are no fields to draw the designed
+    // card from, so its own pages are rendered instead — the fallback costs the
+    // customer a picture, never the card.
     expect(api.photos).toHaveLength(1);
     expect(api.photos[0]?.filename).toBe("fayda-card.png");
     expect(api.photos[0]?.bytes.subarray(0, 8)).toEqual(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
     expect(api.photos[0]?.caption).toContain("image");
+    expect(store.cardSerials).toHaveLength(0);
 
     expect(await store.getBalance(CHAT)).toBe(2);
     expect(store.users.get(CHAT)?.state).toBe("idle");
@@ -1677,6 +1685,62 @@ describe("card retrieval", () => {
     expect(store.otpSessions[0]?.status).toBe("verified");
     expect(store.otpSessions[0]?.fanSecret).toBeNull();
     expect(store.otpSessions[0]?.providerRef).toBeNull();
+  });
+
+  /**
+   * When the provider accepts the code a second time, the picture after the PDF
+   * is the card design itself: `assets/card-background.png` with the holder's
+   * particulars stamped in. The document stays the provider's original; only
+   * the picture is drawn here, so only the picture is numbered.
+   */
+  it("draws the card design after the original PDF when the fields come back", async () => {
+    const pdf = await PDFDocument.create().then((doc) => {
+      doc.addPage([242.645, 153.071]);
+      return doc.save().then((bytes) => Buffer.from(bytes));
+    });
+    cards.byFormat.pdf = {
+      outcome: "verified",
+      format: "pdf",
+      pdf,
+      filename: "Fayda-1234567890123456.pdf",
+      remainingPoints: 497,
+    };
+    cards.byFormat.json = {
+      outcome: "verified",
+      format: "json",
+      identity: IDENTITY,
+      remainingPoints: 496,
+    };
+
+    await startIn("en");
+    store.users.get(CHAT)!.points = 3;
+    await handleUpdate(message("📱 OTP 1 ⭐"), deps);
+    await handleUpdate(message("1234567890123456"), deps);
+    await handleUpdate(message("123456"), deps);
+
+    // Original document first, then one JSON verify for the picture's fields.
+    expect(api.documents).toHaveLength(1);
+    expect(api.documents[0]?.filename).toBe("Fayda-1234567890123456.pdf");
+    expect(cards.calls.filter((c) => c.method === "verifyOtp").map((c) => c.format)).toEqual([
+      "pdf",
+      "json",
+    ]);
+
+    // The picture is the designed card — front and back side by side — not a
+    // rendering of the PDF's pages.
+    expect(api.photos).toHaveLength(1);
+    const image = await loadImage(api.photos[0]!.bytes);
+    expect(image.width).toBe(2600);
+    expect(image.height).toBe(800);
+
+    // Drawn here, so it is numbered; the provider's document in front of it is
+    // untouched and still carries no SN of ours.
+    expect(store.cardSerials).toHaveLength(1);
+    expect(api.documents[0]?.caption).not.toContain("SN:");
+
+    // One point from the customer, as before. The second verify is spent
+    // upstream, which is the trade for the designed picture.
+    expect(await store.getBalance(CHAT)).toBe(2);
   });
 
   /**

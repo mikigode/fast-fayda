@@ -7,11 +7,12 @@ import { PDFiumLibrary } from "@hyzyla/pdfium";
  * The provider's PDF, drawn as a picture.
  *
  * The PDF verify endpoint returns the card as a document and nothing else — no
- * identity fields, so the card image `cardImage.ts` draws from JSON cannot be
- * made for it. What the document *is*, though, is a picture already: a PDF page
- * is a description of ink on paper. Rendering that page gives the same card as
- * an image, without a second verify (and so without spending a second point
- * upstream), and without altering the document that is delivered alongside it.
+ * identity fields. The router asks the JSON endpoint for those separately, so
+ * the designed card in `cardImage.ts` can be drawn from them, but that second
+ * call can be refused (a code is usually already spent by then) or fail. This
+ * is the picture for that case: a PDF page is already a description of ink on
+ * paper, so rendering it gives the card as an image, without touching the
+ * document delivered alongside it.
  *
  * PDFium — the renderer inside Chrome — is used through its WebAssembly build,
  * so this needs no native binary and no host fonts: a PDF that embeds its fonts

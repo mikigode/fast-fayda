@@ -6,7 +6,7 @@ import {
   type InlineKeyboard,
   type ReplyKeyboard,
 } from "./api";
-import { liveCardProvider, type CardProvider } from "./card";
+import { liveCardProvider, type CardIdentity, type CardProvider } from "./card";
 import { broadcastToUsers } from "./broadcast";
 import { CARD_IMAGE_FILENAME, toCardImage } from "./cardImage";
 import { toPdfImage } from "./pdfImage";
@@ -975,11 +975,13 @@ async function onOtpSubmitted(
   await home(deps, user, lang, c.otpVerifying);
 
   // Which verify endpoint this code uses is decided by the customer's chosen
-  // download format, not per attempt: a successful verify costs a point and
-  // the two endpoints are separate verifications, so asking for both would
-  // spend two points for one card. "Printable Card" builds the A4 sheet here
-  // from identity fields (JSON); every other format delivers the provider's
-  // own PDF, which is the document people actually want to keep.
+  // download format: "Printable Card" builds the A4 sheet here from identity
+  // fields (JSON); every other format delivers the provider's own PDF, which is
+  // the document people actually want to keep. A PDF result has no identity
+  // fields, so the card picture that follows it asks the JSON endpoint for the
+  // same code afterwards — a second, deliberate point upstream. That call is
+  // made only after the document is delivered (see below), so it can cost a
+  // picture but never the card.
   const wantsPrintable = user.downloadType === "printable";
   const result = await deps.cards.verifyOtp({
     fan,
@@ -1042,19 +1044,17 @@ async function onOtpSubmitted(
     }
   }
 
-  // Only the printable card this bot draws gets a serial. The provider's
-  // original PDF is passed through untouched and keeps whatever numbering the
-  // provider already printed in it.
-  let serial: number | null = null;
-  if (result.format === "json") {
-    try {
-      serial = await deps.store.nextCardSerial();
-    } catch (error) {
-      // The card is already paid for, upstream and here. A numbering failure
-      // must cost the card its SN, never the customer their delivery.
-      console.error("card serial allocation failed:", error instanceof Error ? error.message : error);
-    }
-  }
+  // The provider's original PDF is passed through untouched and keeps whatever
+  // numbering the provider already printed in it. A printable card — and the
+  // card picture composed for a PDF delivery, once its fields arrive — is one
+  // this bot drew, so it gets a serial. The allocation for that picture happens
+  // later, after the document has gone out: a code that cannot be verified a
+  // second time must not burn a number.
+  let serial: number | null = result.format === "json" ? await nextSerial(deps) : null;
+
+  // The latest upstream balance seen, from either verify. The PDF call's header
+  // is the first answer; a successful second verify is a fresher one.
+  let latestPoints = result.remainingPoints;
 
   try {
     // A JSON verify delivers a structured identity, from which the print sheet
@@ -1099,15 +1099,33 @@ async function onOtpSubmitted(
     );
 
     // The card also goes out as a picture, right after the document: the PDF is
-    // what gets printed, the image is what gets forwarded. Which picture depends
-    // on what came back — the printable sheet is drawn from the identity fields,
-    // while the provider's own PDF has no fields and is rendered page for page
-    // instead. It carries its own guard because the card has been delivered by
-    // now — an image that fails to render or upload must not read as a lost card
-    // to the catch below.
+    // what gets printed, the image is what gets forwarded. The printable sheet
+    // is drawn from the identity fields it already has. A PDF verify returns
+    // only the document, so the fields for its picture are requested from the
+    // JSON endpoint with the same code — after the document has gone out, so a
+    // second verify that fails (an already-used code, a provider hiccup) costs
+    // the customer a picture at most, and the picture falls back to the
+    // document's own pages. This block carries its own guard for the same
+    // reason: the card has been delivered, so an image that fails to render or
+    // upload must not read as a lost card to the catch below.
     try {
-      const image =
-        result.format === "json" ? await toCardImage(result.identity, serial) : await toPdfImage(result.pdf);
+      let image: Buffer;
+      if (result.format === "json") {
+        image = await toCardImage(result.identity, serial);
+      } else {
+        const extra = await identityFromSecondVerify(deps, {
+          fan,
+          otp: code,
+          session: session.providerRef,
+        });
+        if (extra) {
+          latestPoints = extra.remainingPoints ?? latestPoints;
+          serial = await nextSerial(deps);
+          image = await toCardImage(extra.identity, serial);
+        } else {
+          image = await toPdfImage(result.pdf);
+        }
+      }
       await deps.api.sendPhoto(
         user.chatId,
         { bytes: image, filename: CARD_IMAGE_FILENAME },
@@ -1135,8 +1153,54 @@ async function onOtpSubmitted(
 
   // An upstream balance at zero fails every customer after it, so the warning
   // has to reach a human before that happens rather than after.
-  if (result.remainingPoints !== null && result.remainingPoints <= 10) {
-    await notifyAdmins(deps, `Card API balance is low: ${result.remainingPoints} points left. Recharge it before deliveries start failing.`);
+  if (latestPoints !== null && latestPoints <= 10) {
+    await notifyAdmins(deps, `Card API balance is low: ${latestPoints} points left. Recharge it before deliveries start failing.`);
+  }
+}
+
+/**
+ * Asks the JSON endpoint for the fields behind a code whose PDF was already
+ * delivered, so the picture that follows can be the card design rather than a
+ * photograph of a document.
+ *
+ * This is a second verification and therefore a second point upstream; that is
+ * a deliberate trade, made only after the document is safe on the customer's
+ * side. Any failure returns null and the caller falls back to the document's
+ * own pages: an already-used code, a provider that is down, or a changed
+ * response shape must cost a picture, never the card.
+ */
+async function identityFromSecondVerify(
+  deps: BotDeps,
+  args: { fan: string; otp: string; session: string },
+): Promise<{ identity: CardIdentity; remainingPoints: number | null } | null> {
+  try {
+    const result = await deps.cards.verifyOtp({ ...args, format: "json" });
+    if (result.outcome === "verified" && result.format === "json") {
+      return { identity: result.identity, remainingPoints: result.remainingPoints };
+    }
+    if (result.outcome === "rejected") {
+      console.error(`card image: second verify was rejected: ${result.message}`);
+    } else {
+      console.error("card image: second verify did not complete");
+    }
+  } catch (error) {
+    console.error("card image: second verify failed:", error instanceof Error ? error.message : error);
+  }
+  return null;
+}
+
+/**
+ * The next serial for a card this bot drew, or null when numbering is down.
+ *
+ * The card is already paid for, upstream and here; a numbering failure must
+ * cost it its SN, never the customer their delivery.
+ */
+async function nextSerial(deps: BotDeps): Promise<number | null> {
+  try {
+    return await deps.store.nextCardSerial();
+  } catch (error) {
+    console.error("card serial allocation failed:", error instanceof Error ? error.message : error);
+    return null;
   }
 }
 

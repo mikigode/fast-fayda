@@ -413,16 +413,19 @@ A FAN is verified through the endpoint that matches the chosen download format:
 **`/verify-otp`** for the provider's original PDF (the default, and every format
 except "Printable Card"), or **`/verify-otp-json`** when the A4 printable sheet
 is wanted, which is rendered here from the identity fields (photo and QR
-included). Each successful verify costs a point, so the two are never both
-called for the same code. The picture that follows the document comes from
-whichever endpoint was used: the designed front-and-back image for "Printable
-Card", and a rasterisation of the provider's own PDF pages for the rest — so a
-PDF delivery also arrives as a PNG, without a second verify. Although the
-published docs describe a
-`{ otp, fanNumber, session }` body, the live API refuses that with "finNumber is
-required" (on both endpoints). The bot only ever collects a 16-digit FAN, so the
-client derives the required 12-digit `finNumber` from it — the FAN's last 12
-digits — which the live endpoint accepts.
+included). The PDF endpoint returns the document and no fields, so the picture
+that follows a PDF delivery asks `/verify-otp-json` for the same code *after*
+the document has gone out: a second, deliberate point upstream, which buys the
+designed front-and-back card (`assets/card-background.png` with the holder's
+particulars stamped in) rather than a rasterisation of the PDF's pages. If the
+provider refuses that second call — an already-used code, an outage — the
+picture falls back to the pages themselves, and the card already delivered is
+unaffected. "Printable Card" needs no second call: its verify is the JSON one,
+and the picture is drawn from the same fields. Although the
+published docs describe a `{ otp, fanNumber, session }` body, the live API refuses
+that with "finNumber is required" (on both endpoints). The bot only ever
+collects a 16-digit FAN, so the client derives the required 12-digit `finNumber`
+from it — the FAN's last 12 digits — which the live endpoint accepts.
 
 Three things about it are deliberate:
 
@@ -434,11 +437,13 @@ spend their privacy for nothing.
 nothing upstream; a verify costs a point, on success. So the customer is
 charged when a card exists, and a failed or mistyped code is free.
 
-**A verify happens exactly once per code.** No retry on timeout. A retry would
-either spend a second point or fail against an already-used code, and neither
-is worth the chance that the first attempt quietly succeeded — so a verify that
-does not come back closes the session and tells the admin chat to check whether
-a point was spent.
+**A verify happens exactly once per code — for the document.** No retry on
+timeout. A retry would either spend a second point or fail against an
+already-used code, and neither is worth the chance that the first attempt
+quietly succeeded — so a verify that does not come back closes the session and
+tells the admin chat to check whether a point was spent. The one exception is
+the picture's JSON request, which happens only after the document is delivered
+and whose failure costs a picture, never the card.
 
 The PDF is never stored. It goes straight to the person who asked for it, and
 the `card_jobs` row that records the spend deliberately carries no file handle.
