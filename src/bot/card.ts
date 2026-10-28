@@ -99,6 +99,12 @@ export type CardProvider = {
     session: string;
     /** Which endpoint: the rendered PDF, or the structured JSON. */
     format: "pdf" | "json";
+    /**
+     * Overrides the provider's default wait for this one call. The picture's
+     * second verify uses a shorter one, so a slow answer cannot push the
+     * delivery past the platform's function limit.
+     */
+    timeoutMs?: number;
   }): Promise<VerifyOtpResult>;
   /** Upstream account balance, for monitoring. Null when it cannot be read. */
   balance(): Promise<{ points: number; status: string } | null>;
@@ -284,7 +290,7 @@ export function httpCardProvider(
       }
     },
 
-    async verifyOtp({ fan, otp, session, format }) {
+    async verifyOtp({ fan, otp, session, format, timeoutMs: callTimeoutMs }) {
       const context = await requestContext();
       if (!context) return { outcome: "unavailable" };
       const endpoint = format === "json" ? "/verify-otp-json" : "/verify-otp";
@@ -298,7 +304,7 @@ export function httpCardProvider(
           // `finNumber` is not in the docs but is required live; it is derived
           // from the FAN (see the file comment).
           body: JSON.stringify({ otp, fanNumber: fan, finNumber: finNumberFromFan(fan), session }),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(callTimeoutMs ?? timeoutMs),
         });
       } catch (error) {
         console.error("card verify-otp failed:", error instanceof Error ? error.message : error);

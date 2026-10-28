@@ -945,6 +945,16 @@ async function onFanSubmitted(
 const OTP_ATTEMPT_LIMIT = 3;
 
 /**
+ * How long the picture's second verify may take.
+ *
+ * The document is already delivered when this runs, and the function running
+ * the whole flow has a hard limit (60s on Vercel). A picture is worth a short
+ * wait, not the tail of that budget: if the fields do not arrive quickly, the
+ * PDF's own pages are rendered instead.
+ */
+const SECOND_VERIFY_TIMEOUT_MS = 15_000;
+
+/**
  * The code, and the one call in this service that costs money.
  *
  * A verify deducts a point from the upstream account on success, so it happens
@@ -1174,7 +1184,11 @@ async function identityFromSecondVerify(
   args: { fan: string; otp: string; session: string },
 ): Promise<{ identity: CardIdentity; remainingPoints: number | null } | null> {
   try {
-    const result = await deps.cards.verifyOtp({ ...args, format: "json" });
+    const result = await deps.cards.verifyOtp({
+      ...args,
+      format: "json",
+      timeoutMs: SECOND_VERIFY_TIMEOUT_MS,
+    });
     if (result.outcome === "verified" && result.format === "json") {
       return { identity: result.identity, remainingPoints: result.remainingPoints };
     }
