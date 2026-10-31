@@ -1510,6 +1510,68 @@ describe("admin panel", () => {
     expect(store.grantedAdmins).toHaveLength(0);
     expect(api.lastScreen.text).toContain("cannot be removed here");
   });
+
+  /**
+   * The accounts customers pay into are runtime settings, not deployment
+   * constants. An admin should be able to change them from the chat they are
+   * already in, and the very next purchase screen must use the new number.
+   */
+  it("edits a CBE or Telebirr account from the admin panel", async () => {
+    await adminStartIn();
+    store.settings.cbeAccountName = "Old Name";
+    store.settings.cbeAccountNumber = "1000123456789";
+    store.settings.telebirrAccountName = "Telebirr Name";
+    store.settings.telebirrAccountNumber = "0911223344";
+
+    await handleUpdate(adminMessage("/admin"), deps);
+    expect(api.buttons()).toContain("ap:accounts");
+
+    await handleUpdate(adminTap("ap:accounts"), deps);
+    expect(api.lastScreen.text).toContain("Bank accounts");
+    expect(api.lastScreen.text).toContain("Old Name");
+    expect(api.lastScreen.text).toContain("1000123456789");
+    expect(api.lastScreen.text).toContain("0911223344");
+    expect(api.buttons()).toContain("ap:acct:cbeAccountNumber");
+
+    await handleUpdate(adminTap("ap:acct:cbeAccountNumber"), deps);
+    expect(store.users.get(ADMIN)?.state).toBe("awaiting_account");
+    expect(store.users.get(ADMIN)?.stateData).toEqual({ field: "cbeAccountNumber" });
+
+    await handleUpdate(adminMessage("1000999888777"), deps);
+
+    expect(store.settings.cbeAccountNumber).toBe("1000999888777");
+    expect(store.users.get(ADMIN)?.state).toBe("idle");
+    expect(api.lastScreen.text).toContain("CBE account number saved.");
+    expect(api.lastScreen.text).toContain("1000999888777");
+
+    // The buy-points screen reads the resolved settings, so the new number is
+    // already in force with no restart.
+    await startIn("en");
+    await handleUpdate(message("💳 Buy Points"), deps);
+    expect(api.lastScreen.text).toContain("1000999888777");
+  });
+
+  it("clears a bank account with a dash and falls back to the deployment value", async () => {
+    await adminStartIn();
+    store.settings.telebirrAccountName = "Stored Name";
+
+    await handleUpdate(adminMessage("/admin"), deps);
+    await handleUpdate(adminTap("ap:accounts"), deps);
+    await handleUpdate(adminTap("ap:acct:telebirrAccountName"), deps);
+    await handleUpdate(adminMessage("-"), deps);
+
+    expect(store.settings.telebirrAccountName).toBeNull();
+    expect(store.users.get(ADMIN)?.state).toBe("idle");
+    expect(api.lastScreen.text).toContain("Telebirr account name cleared.");
+  });
+
+  it("refuses a bank-account edit from someone who is not an admin", async () => {
+    await startIn("en");
+    await handleUpdate(tap("ap:acct:cbeAccountNumber"), deps);
+
+    expect(store.users.get(CHAT)?.state).not.toBe("awaiting_account");
+    expect(api.screens).toHaveLength(0);
+  });
 });
 
 describe("settings", () => {

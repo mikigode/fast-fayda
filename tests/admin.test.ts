@@ -401,6 +401,36 @@ describe("admin settings", () => {
     expect(store.settingsUpdates[0]).toHaveProperty("cardApiKey", null);
   });
 
+  it("saves the CBE and Telebirr accounts customers are shown", async () => {
+    const store = makeStore([], [ADMIN_ID]);
+
+    await postSettings(store, {
+      cbeAccountName: "Fast Fayda",
+      cbeAccountNumber: "1000123456789",
+      telebirrAccountName: "Fast Fayda",
+      telebirrAccountNumber: "0911223344",
+    });
+
+    expect(store.settingsUpdates[0]).toMatchObject({
+      cbeAccountName: "Fast Fayda",
+      cbeAccountNumber: "1000123456789",
+      telebirrAccountName: "Fast Fayda",
+      telebirrAccountNumber: "0911223344",
+    });
+  });
+
+  it("clears an account when its field is submitted empty", async () => {
+    const store = makeStore([], [ADMIN_ID], {
+      cbeAccountName: "Old Name",
+      cbeAccountNumber: "1000123456789",
+    });
+
+    await postSettings(store, { cbeAccountName: "", cbeAccountNumber: "" });
+
+    expect(store.settingsUpdates[0]).toHaveProperty("cbeAccountName", null);
+    expect(store.settingsUpdates[0]).toHaveProperty("cbeAccountNumber", null);
+  });
+
   it("tells the portal a key is saved without ever showing it", async () => {
     const { out, res } = makeRes();
 

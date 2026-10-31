@@ -139,6 +139,27 @@ const SUPPORT_MAX_CHARS = 1000;
 // ---------------------------------------------------------------------------
 
 /**
+ * The bank-account fields an admin can edit from the chat panel.
+ *
+ * These are the same columns the admin portal's Settings form writes, so a
+ * change made here is live for the very next "Buy Points" message — the
+ * conversation resolves the accounts from the database every time rather than
+ * reading them once at boot.
+ */
+const ACCOUNT_FIELDS = {
+  cbeAccountName: "CBE account name",
+  cbeAccountNumber: "CBE account number",
+  telebirrAccountName: "Telebirr account name",
+  telebirrAccountNumber: "Telebirr account number",
+} as const;
+
+type AccountField = keyof typeof ACCOUNT_FIELDS;
+
+function isAccountField(value: string): value is AccountField {
+  return value in ACCOUNT_FIELDS;
+}
+
+/**
  * Telegram allows 64 bytes of callback_data, which is why these are terse. They
  * are also attacker-controlled — anyone can send any callback_data to a bot —
  * so nothing here is trusted beyond selecting a screen.
@@ -181,6 +202,9 @@ const CB = {
   /** Super-admin only: list every admin, with a remove button per granted one. */
   adminList: "ap:admins",
   adminRemove: (telegramId: number) => `ap:rm:${telegramId}`,
+  /** The CBE/Telebirr accounts customers pay into, editable in the chat. */
+  adminAccounts: "ap:accounts",
+  adminAccount: (field: AccountField) => `ap:acct:${field}`,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -532,6 +556,8 @@ async function onMessage(message: TgMessage, deps: BotDeps): Promise<void> {
       return onPostSubmitted(deps, user, lang, text);
     case "awaiting_admin":
       return onAdminAddSubmitted(deps, target, user, lang, text);
+    case "awaiting_account":
+      return onAccountSubmitted(deps, target, user, lang, text);
     case "awaiting_upload":
       // Reached with text, not a file — the file path above did not match.
       return home(deps, user, lang, c.uploadWrongType);
@@ -1648,6 +1674,7 @@ async function showAdminPanel(deps: BotDeps, target: Target, user: BotUser): Pro
       { text: `📋 Review payments (${payments.length})`, callback_data: CB.adminPayments },
     ]);
   }
+  keyboard.push([{ text: "🏦 Bank accounts", callback_data: CB.adminAccounts }]);
   keyboard.push([{ text: "📣 Post to all users", callback_data: CB.adminPost }]);
   if (superAdmin) {
     keyboard.push([{ text: "➕ Add admin", callback_data: CB.adminAdd }]);
@@ -1656,6 +1683,111 @@ async function showAdminPanel(deps: BotDeps, target: Target, user: BotUser): Pro
   keyboard.push([{ text: "✖️ Close", callback_data: CB.menu }]);
 
   await screen(deps, target, user.telegramId, lines.join("\n"), keyboard);
+}
+
+/**
+ * The accounts customers are told to pay into.
+ *
+ * The portal's Settings form edits the same columns, but an operator working
+ * from the chat should not have to find a browser to answer "where do I send
+ * the money?". The conversation resolves these values from the database on
+ * every message, so a change here is visible to customers immediately.
+ */
+async function showAdminAccounts(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  note?: string,
+): Promise<void> {
+  if (!(await isAdmin(deps, user.telegramId))) return;
+  const settings = await resolveSettings(deps.store);
+
+  const line = (name: string, number: string): string =>
+    `<b>${escapeHtml(name || "not set")}</b>\n<code>${escapeHtml(number || "—")}</code>`;
+
+  const keyboard: InlineKeyboard = [
+    [{ text: "✏️ CBE name", callback_data: CB.adminAccount("cbeAccountName") }],
+    [{ text: "✏️ CBE number", callback_data: CB.adminAccount("cbeAccountNumber") }],
+    [{ text: "✏️ Telebirr name", callback_data: CB.adminAccount("telebirrAccountName") }],
+    [{ text: "✏️ Telebirr number", callback_data: CB.adminAccount("telebirrAccountNumber") }],
+    [{ text: "← Back", callback_data: CB.adminPanel }],
+  ];
+
+  await screen(
+    deps,
+    target,
+    user.telegramId,
+    "<b>Bank accounts</b>\n\n" +
+      "These are the accounts customers are told to pay into when buying points. " +
+      "Changes apply to the next message that shows them — no redeploy.\n\n" +
+      `CBE\n${line(settings.cbeAccountName, settings.cbeAccountNumber)}\n\n` +
+      `Telebirr\n${line(settings.telebirrAccountName, settings.telebirrAccountNumber)}` +
+      (note ? `\n\n${note}` : ""),
+    keyboard,
+  );
+}
+
+/** Asks an admin for the new value of one bank field. */
+async function startAccountEdit(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  lang: Lang,
+  field: AccountField,
+): Promise<void> {
+  if (!(await isAdmin(deps, user.telegramId))) return;
+  await deps.store.setState(user.telegramId, "awaiting_account", { field });
+  await screen(
+    deps,
+    target,
+    user.telegramId,
+    `Send the new ${ACCOUNT_FIELDS[field]}.\n\n` +
+      "Send /cancel to stop, or a single - to clear it and fall back to the deployment's value.",
+    cancelKeyboard(lang),
+  );
+}
+
+/** The new value of a bank field, once the admin sends it. */
+async function onAccountSubmitted(
+  deps: BotDeps,
+  target: Target,
+  user: BotUser,
+  lang: Lang,
+  text: string,
+): Promise<void> {
+  // The state could have been set before a change to the allow-list; re-check
+  // rather than trust it.
+  if (!(await isAdmin(deps, user.telegramId))) {
+    await deps.store.setState(user.telegramId, "idle");
+    return home(deps, user, lang, t(lang).unknownInput);
+  }
+
+  const field = String(user.stateData.field ?? "");
+  if (!isAccountField(field)) {
+    await deps.store.setState(user.telegramId, "idle");
+    return showAdminAccounts(deps, target, user, "That edit expired. Open Bank accounts again.");
+  }
+
+  const raw = text.trim();
+  if (raw.length > 100) {
+    return screen(
+      deps,
+      target,
+      user.telegramId,
+      "That is too long for an account field (100 characters max). Send a shorter value, or /cancel.",
+      cancelKeyboard(lang),
+    );
+  }
+  const value = raw === "-" || raw === "" ? null : raw;
+  await deps.store.updateSettings({ [field]: value }, user.telegramId);
+  await deps.store.setState(user.telegramId, "idle");
+
+  return showAdminAccounts(
+    deps,
+    target,
+    user,
+    `${ACCOUNT_FIELDS[field]} ${value === null ? "cleared." : "saved."}`,
+  );
 }
 
 /**
@@ -1949,9 +2081,18 @@ async function onAdminPanelAction(
     return removeAdmin(deps, target, user, telegramId);
   }
 
+  // Bank fields are per-row too: `ap:acct:<field>` names the column to edit.
+  if (data.startsWith("ap:acct:")) {
+    const field = data.slice("ap:acct:".length);
+    if (!isAccountField(field)) return;
+    return startAccountEdit(deps, target, user, user.language ?? "en", field);
+  }
+
   switch (data) {
     case CB.adminPanel:
       return showAdminPanel(deps, target, user);
+    case CB.adminAccounts:
+      return showAdminAccounts(deps, target, user);
     case CB.adminPayments:
       return showPendingPayments(deps, target, user);
     case CB.adminUsers:

@@ -518,7 +518,10 @@ The same announcement, and the same payment review, are available in chat:
 points they hold between them, the pending payment and document counts, and the
 card-API account balance (“My points”); its buttons open a **Users** list (each
 person's balance, highest first), the pending-payment review queue (each row
-carrying the usual Approve/Reject buttons), and a **Post to all users** flow.
+carrying the usual Approve/Reject buttons), a **Bank accounts** screen for the
+CBE and Telebirr name and number customers are shown (a change there is live for
+the very next Buy Points message, and a single `-` clears a field back to the
+deployment's value), and a **Post to all users** flow.
 A super admin also sees **Add admin** and **Admins** (list with a Remove button
 per granted admin). The panel is deliberately in English rather than translated
 copy, since its audience is whoever runs the bot; the broadcast text is escaped
@@ -537,10 +540,10 @@ immediate: removing a Telegram id from `ADMIN_TELEGRAM_IDS`, or revoking a
 granted admin, takes effect on their very next request, since membership is
 re-checked every time rather than trusted from the cookie.
 
-Prices and receiving accounts set from the portal override the
+Prices and receiving accounts set from the portal or the chat panel override the
 `POINT_PRICE_ETB` / `CBE_ACCOUNT_*` / `TELEBIRR_ACCOUNT_*` environment
 variables — those stay as the fallback a fresh deployment starts with, before
-anyone has opened the portal to set real ones.
+anyone has set real ones.
 
 ---
 

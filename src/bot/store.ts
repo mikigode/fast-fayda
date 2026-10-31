@@ -27,6 +27,8 @@ export type BotState =
   | "awaiting_post"
   /** A super admin chose "Add admin"; the next message should be a Telegram id. */
   | "awaiting_admin"
+  /** An admin opened a bank field; the next message is its new value. */
+  | "awaiting_account"
   /** Tapped Screenshot/Upload PDF; the next message should be the file itself. */
   | "awaiting_upload";
 
@@ -291,6 +293,7 @@ const STATES: BotState[] = [
   "awaiting_grant",
   "awaiting_post",
   "awaiting_admin",
+  "awaiting_account",
   "awaiting_upload",
 ];
 
