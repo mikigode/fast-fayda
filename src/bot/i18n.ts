@@ -160,8 +160,8 @@ type Copy = {
     phone: string;
     remainingPoints: number | null;
   }) => string;
-  /** Caption on the front-and-back card image that follows a PDF delivery. */
-  otpCardImage: string;
+  /** Caption on the provider's original PDF, sent after the designed card. */
+  otpOriginalPdf: string;
   uploadUnavailable: (admin: string) => string;
   /** Prompt after tapping Fayda Screenshot / Upload PDF, naming the cost. */
   uploadAsk: (points: number) => string;
@@ -423,7 +423,7 @@ const en: Copy = {
     if (remainingPoints !== null) lines.push(`Remaining points: ${remainingPoints}`);
     return lines.join("\n");
   },
-  otpCardImage: "🖼️ Front & back — the same card as an image.",
+  otpOriginalPdf: "📄 Original PDF from the provider.",
   otpUnavailable: (admin) =>
     "Card retrieval is not connected on this deployment yet.\n\n" +
     `Contact ${admin} to have it enabled.`,
@@ -685,7 +685,7 @@ const am: Copy = {
     if (remainingPoints !== null) lines.push(`የቀረ ነጥብ፡ ${remainingPoints}`);
     return lines.join("\n");
   },
-  otpCardImage: "🖼️ የፊት እና የጀርባ ምስል — ተመሳሳዩ መታወቂያ በምስል።",
+  otpOriginalPdf: "📄 የመጀመሪያው PDF ከአገልግሎት አቅራቢው።",
   otpUnavailable: (admin) =>
     "የመታወቂያ ማውጣት አገልግሎት በዚህ ላይ ገና አልተገናኘም።\n\n" + `ለማስጀመር ${admin} ያግኙ።`,
   otpNotAnswered: (admin) =>

@@ -403,29 +403,35 @@ that retrieval is not connected when it is not.
 ```
 tap OTP 1/2/3  → balance checked first, cost named
 send a FAN     → provider sends a code to the phone registered against it
-send the code  → the provider's original PDF comes back and is delivered
-                 as a Telegram document, followed by the same card as a PNG
-                 (or, for "Printable Card", just the designed PNG)
+send the code  → JSON verify returns the identity fields
+                 → the designed 2600×800 card is drawn and sent first
+                 → for every format except "Printable Card", the provider's
+                   original PDF is then fetched and sent as a document
 ```
 
-A FAN is verified through the endpoint that matches the chosen download format:
-**`/verify-otp`** for the provider's original PDF (the default, and every format
-except "Printable Card"), or **`/verify-otp-json`** for "Printable Card", whose
+Every completed verification is verified with **`/verify-otp-json`** first. Its
 identity fields are drawn here as the 2600×800 front-and-back picture (photo and
-QR included). That format sends no document — the picture is the card. The PDF
-endpoint returns the document and no fields, so the designed card picture that
-follows a PDF delivery asks `/verify-otp-json` for the same code *after* the
-document has gone out: a second, deliberate point upstream, which buys the
-front-and-back card (`assets/card-background.png` with the holder's particulars
-stamped in) rather than a rasterisation of the PDF's pages. If the provider
-refuses that second call — an already-used code, an outage — the picture falls
-back to the card artwork embedded in the delivered PDF; a document with no such
-artwork simply gets no picture. "Printable Card" needs no second call: its
-verify is the JSON one, and its picture is drawn from the same fields. Although the
-published docs describe a `{ otp, fanNumber, session }` body, the live API refuses
-that with "finNumber is required" (on both endpoints). The bot only ever
-collects a 16-digit FAN, so the client derives the required 12-digit `finNumber`
-from it — the FAN's last 12 digits — which the live endpoint accepts.
+QR included), and that image is the delivery: it goes out before anything else
+and cannot be withheld by a later failure. "Printable Card" stops there, because
+the picture *is* the card.
+
+For the other formats, the provider's original PDF follows as a second,
+best-effort call to **`/verify-otp`**. It is started as soon as the JSON verify
+succeeds, so it runs while the image is being drawn and uploaded. If the provider
+refuses it — an already-used code, an outage, no time left in the request — the
+customer keeps the image and simply does not get the PDF. Nothing falls back to
+artwork rasterised from a PDF, and no A4 sheet is produced.
+
+That second verify is another point spent upstream; the customer is still
+charged one. The previous order (PDF first, JSON second) meant a refused second
+call left only the PDF's own artwork, which is the 1524×1200 image this flow
+must never send. Image first is the guarantee; PDF second is the bonus.
+
+Although the published docs describe a `{ otp, fanNumber, session }` body, the
+live API refuses that with "finNumber is required" (on both endpoints). The bot
+only ever collects a 16-digit FAN, so the client derives the required 12-digit
+`finNumber` from it — the FAN's last 12 digits — which the live endpoint
+accepts.
 
 Three things about it are deliberate:
 
@@ -437,13 +443,12 @@ spend their privacy for nothing.
 nothing upstream; a verify costs a point, on success. So the customer is
 charged when a card exists, and a failed or mistyped code is free.
 
-**A verify happens exactly once per code — for the document.** No retry on
-timeout. A retry would either spend a second point or fail against an
-already-used code, and neither is worth the chance that the first attempt
-quietly succeeded — so a verify that does not come back closes the session and
-tells the admin chat to check whether a point was spent. The one exception is
-the picture's JSON request, which happens only after the document is delivered
-and whose failure costs a picture, never the card.
+**The JSON verify happens exactly once per code.** No retry on timeout. A retry
+would either spend a second point or fail against an already-used code, and
+neither is worth the chance that the first attempt quietly succeeded — so a
+verify that does not come back closes the session and tells the admin chat to
+check whether a point was spent. The PDF verify that follows is the one
+deliberate second call, and its failure costs only the PDF.
 
 The PDF is never stored. It goes straight to the person who asked for it, and
 the `card_jobs` row that records the spend deliberately carries no file handle.
@@ -481,10 +486,10 @@ spend `POINTS_PER_PRINT` points, and file it as a pending card job for an admin
 to see and mark delivered in the admin portal below. Turning an *uploaded* file
 into a printable card — compositing it onto a background template — is not
 built, and is not planned: reproducing the card's security background is
-forgery whoever asks for it. The OTP flow above needs none of that: it delivers
-the provider's own PDF, or — for the "Printable Card" format — draws the
+forgery whoever asks for it. The OTP flow above needs none of that: it draws the
 2600×800 front-and-back card from the identity fields the verify endpoint
-returns.
+returns, then fetches the provider's original PDF when the chosen format wants
+it.
 
 ---
 

@@ -17,15 +17,14 @@ import type { BotStore } from "./store";
  * succeeds with finNumber 670831630236, and the response echoes the same `fin`.
  * If the provider ever changes that contract, verifying breaks loudly here.
  *
- * **The verify format follows the customer's download choice.** `/verify-otp`
- * returns the provider's rendered PDF — what "PDF mirror" (the default) and
- * every other format deliver unchanged. `/verify-otp-json` returns the identity
- * fields the designed card picture is drawn from, so it is used for the
- * "Printable Card" format. Each successful verify costs a point,
- * and the document is fetched through exactly one endpoint; the JSON one is
- * asked for a second time only after a PDF has been delivered, to get the
- * fields for the picture (see `router.ts`). The PDF branch below is a faithful
- * client of the provider's API either way.
+ * **The JSON verify is the primary one.** `/verify-otp-json` returns the
+ * identity fields the designed card picture is drawn from, and that picture is
+ * delivered for every completed verification. `/verify-otp` returns the
+ * provider's rendered PDF, which formats other than "Printable Card" also want;
+ * it is fetched by a second verify after the JSON one has succeeded. Each
+ * successful verify costs a point, so the customer's one point buys the card
+ * and the service absorbs the extra upstream call. The PDF branch below is a
+ * faithful client of the provider's API either way.
  *
  * **A successful JSON verify is not a PDF, and a PDF verify is not JSON.** The
  * two endpoints invert each other, so the response is always read as bytes
@@ -33,10 +32,11 @@ import type { BotStore } from "./store";
  * a PDF as JSON gets "unexpected token %" from `%PDF-1.4`, which reads as a
  * broken client rather than a successful verification.
  *
- * **A verify costs a point upstream, on success.** So the document is fetched
- * exactly once per code: no retries, and the PDF and JSON endpoints are not
- * both asked for a document. The router's separate JSON call for a picture's
- * fields is made after delivery and handled as best-effort.
+ * **A verify costs a point upstream, on success.** The first (JSON) verify is
+ * made exactly once per code: no retries, because a retry would either spend a
+ * second point or fail on an already-used code. The optional PDF verify after
+ * it is the router's deliberate second call, and its failure costs only the
+ * PDF.
  *
  * The session token is opaque and must go back exactly as it arrived —
  * untrimmed, unparsed, unmodified.

@@ -6,10 +6,9 @@ import {
   type InlineKeyboard,
   type ReplyKeyboard,
 } from "./api";
-import { liveCardProvider, type CardIdentity, type CardProvider } from "./card";
+import { liveCardProvider, type CardProvider } from "./card";
 import { broadcastToUsers } from "./broadcast";
 import { CARD_IMAGE_FILENAME, toCardImage } from "./cardImage";
-import { cardSidesFromPdf } from "./pdfImage";
 import { open, seal } from "../crypto";
 import { currentProvider, hashId, last4, parseId, type FaydaProvider } from "./fayda";
 import {
@@ -970,39 +969,46 @@ async function onFanSubmitted(
 const OTP_ATTEMPT_LIMIT = 3;
 
 /**
- * How long the picture's second verify may take.
+ * How long the optional PDF verify may take.
  *
- * The PDF is already delivered when the picture is sent, but the function
- * running the whole flow is killed at 60 s on Vercel, and the second verify is
- * started as soon as the first succeeds so it can run while the document is
- * being uploaded. The cap is the request's remaining budget rather than a fixed
- * guess: the vendor's guide says to allow ~60–120 s for a verify, and the old
- * 15 s cap is what made production give up on the designed card.
+ * The designed card is delivered from the first (JSON) verify, so the PDF is
+ * only a bonus from here. The function running the whole flow is killed at 60 s
+ * on Vercel, and the PDF call is started as soon as the JSON verify succeeds so
+ * it can run while the image is being drawn and uploaded. The cap is the
+ * request's remaining budget rather than a fixed guess: the vendor's guide says
+ * to allow ~60–120 s for a verify.
  */
 const UPDATE_BUDGET_MS = 55_000;
 const SECOND_VERIFY_MIN_MS = 5_000;
 const SECOND_VERIFY_MAX_MS = 45_000;
 const DELIVERY_RESERVE_MS = 5_000;
 
-/** What the second verify can still spend, given how much of the update already went. */
+/**
+ * What the optional PDF verify can still spend, given how much of the update
+ * already went. Zero means there is not enough time left to start it safely, so
+ * the customer gets the image without waiting on a PDF that cannot arrive.
+ */
 function secondVerifyBudget(startedAt: number): number {
   const remaining = UPDATE_BUDGET_MS - (Date.now() - startedAt) - DELIVERY_RESERVE_MS;
-  return Math.max(SECOND_VERIFY_MIN_MS, Math.min(SECOND_VERIFY_MAX_MS, remaining));
+  if (remaining < SECOND_VERIFY_MIN_MS) return 0;
+  return Math.min(SECOND_VERIFY_MAX_MS, remaining);
 }
 
 /**
  * The code, and the calls in this service that cost money.
  *
- * A verify deducts a point from the upstream account on success, so it happens
- * exactly once per code — no retry on timeout, because a retry would either
- * spend a second point or fail on an already-used code, and neither is worth
- * the chance of the first attempt having quietly succeeded.
+ * A verify deducts a point from the upstream account on success, so the first
+ * one happens exactly once per code — no retry on timeout, because a retry would
+ * either spend a second point or fail on an already-used code, and neither is
+ * worth the chance of the first attempt having quietly succeeded.
  *
- * The one exception is deliberate: a PDF delivery follows its verify with a
- * JSON one to get the fields for the designed card picture. That is a second
- * point upstream (the customer is still charged one), and it is made only after
- * the PDF verify has been accepted. If it fails, the picture is the card
- * artwork inside the delivered PDF — never a rendering of the A4 sheet.
+ * The first verify is always the JSON one. Its fields are what draw the designed
+ * 2600x800 card, and that card is the delivery every completed verification is
+ * owed: it is sent immediately, with no provider artwork or A4 sheet in its
+ * place. For formats that also want the provider's original PDF, a second PDF
+ * verify is started as soon as the JSON one succeeds and runs while the image is
+ * drawn and uploaded. That is a second point upstream (the customer is still
+ * charged one); if it is refused, the PDF is lost and the image is not.
  */
 async function onOtpSubmitted(
   deps: BotDeps,
@@ -1024,30 +1030,20 @@ async function onOtpSubmitted(
     return home(deps, user, lang, c.otpNoSession);
   }
 
-  await deps.api.sendChatAction(
-    user.chatId,
-    user.downloadType === "printable" ? "typing" : "upload_document",
-  );
+  await deps.api.sendChatAction(user.chatId, "typing");
   await home(deps, user, lang, c.otpVerifying);
 
-  // Which verify endpoint this code uses is decided by the customer's chosen
-  // download format: "Printable Card" asks for identity fields (JSON) so the
-  // designed card picture can be drawn here; every other format delivers the
-  // provider's own PDF, which is the document people actually want to keep. A
-  // PDF result has no identity fields, so the designed card picture that
-  // follows it asks the JSON endpoint for the same code once — a second,
-  // deliberate point upstream. That call is started as soon as this verify is
-  // accepted and runs while the PDF is being prepared and sent (see
-  // `cardFields`), so it costs time the request was spending anyway and can
-  // cost a picture at most, never the card.
-  const wantsPrintable = user.downloadType === "printable";
+  // Always ask for the identity fields first: they are the only thing from
+  // which the designed card can be drawn, and that card must arrive whatever
+  // the download format. The provider's own PDF, for formats that want it, is
+  // fetched by a second verify below once this one has succeeded.
   const result = await deps.cards.verifyOtp({
     fan,
     otp: code,
     session: session.providerRef,
     // Both verify endpoints demand a 12-digit finNumber the docs omit; the
     // client derives it from the FAN (see card.ts).
-    format: wantsPrintable ? "json" : "pdf",
+    format: "json",
   });
 
   if (result.outcome === "unavailable") {
@@ -1072,25 +1068,42 @@ async function onOtpSubmitted(
     return home(deps, user, lang, c.otpRejected(result.message));
   }
 
+  if (result.format !== "json") {
+    // The provider was asked for identity fields and returned a document
+    // instead. There is nothing from which to draw the card the customer is
+    // owed, and the point may already be spent upstream, so this is handled
+    // like a verify that did not complete rather than as a delivery.
+    await deps.store.closeOtpSession(session.id, "failed");
+    await deps.store.setState(user.telegramId, "idle");
+    await notifyAdmins(
+      deps,
+      `OTP verify returned a PDF when identity data was requested for ` +
+        `<code>${user.telegramId}</code> — check whether a point was spent upstream.`,
+    );
+    return home(deps, user, lang, c.otpNotAnswered(deps.adminContact));
+  }
+
   await deps.store.closeOtpSession(session.id, "verified");
   await deps.store.setState(user.telegramId, "idle");
 
-  // The picture's fields are requested now, while the document is being
-  // prepared and uploaded, instead of after it: the second verify gets the
-  // request's remaining budget, and the upload costs it no time. It resolves
-  // to null on any failure, so nothing here can delay or spoil the document.
-  const cardFields =
-    result.format === "json"
-      ? null
-      : identityFromSecondVerify(deps, {
+  // The provider's original PDF is a bonus for formats that ask for it. Its
+  // verify is started now, while the card image is drawn and uploaded, so the
+  // wait overlaps with work the request was doing anyway. It resolves to null
+  // on any failure: a refused or slow second verify costs the PDF, never the
+  // image.
+  const pdfBudget = secondVerifyBudget(startedAt);
+  const pdfSecond =
+    user.downloadType !== "printable" && pdfBudget > 0
+      ? pdfFromSecondVerify(deps, {
           fan,
           otp: code,
           session: session.providerRef,
-          timeoutMs: secondVerifyBudget(startedAt),
-        });
+          timeoutMs: pdfBudget,
+        })
+      : null;
 
   // Charged only now, against a card that exists. The job is recorded as
-  // delivered with no file handle: the PDF is somebody's identity document and
+  // delivered with no file handle: the card is somebody's identity document and
   // is passed straight to them, never retained here.
   let spend: { id: string; balance: number };
   try {
@@ -1116,89 +1129,68 @@ async function onOtpSubmitted(
     }
   }
 
-  // The provider's original PDF is passed through untouched and keeps whatever
-  // numbering the provider already printed in it. A printable card — and the
-  // designed picture composed for a PDF delivery, once its fields arrive — is
-  // one this bot drew, so it gets a serial. The artwork taken from the PDF as a
-  // fallback is the provider's own and is not numbered.
-  let serial: number | null = result.format === "json" ? await nextSerial(deps) : null;
+  // Every successful verification is a card this bot drew from the JSON fields,
+  // so it gets a serial. The provider's original PDF, if it follows, is passed
+  // through untouched and keeps whatever numbering the provider printed.
+  const serial = await nextSerial(deps);
 
-  // The latest upstream balance seen, from either verify. The PDF call's header
-  // is the first answer; a successful second verify is a fresher one.
+  // The latest upstream balance seen, from either verify. The JSON call's header
+  // is the first answer; a successful PDF verify is a fresher one.
   let latestPoints = result.remainingPoints;
 
   try {
     const admin = await isAdmin(deps, user.telegramId);
 
-    if (result.format === "json") {
-      // "Printable Card" is the designed picture itself — 2600x800 front and
-      // back on assets/card-background.png — and nothing else. There is no A4
-      // sheet: the customer forwards this image and prints it if they want to,
-      // rather than receiving a page of paper rendered as a document. The
-      // identity summary rides along as the photo's caption.
-      const caption =
-        `${c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance })}` +
-        `${serial === null ? "" : `\nSN: ${serial}`}\n\n` +
-        c.otpIdentitySummary({
-          name: result.identity.name.english || result.identity.name.amharic,
-          fan: result.identity.fanNumber,
-          fin: result.identity.fin,
-          dateOfBirth: result.identity.dateOfBirth.gregorian,
-          phone: result.identity.phone,
-          remainingPoints: result.remainingPoints,
-        });
+    // The designed card — 2600x800 front and back on
+    // assets/card-background.png — is the delivery every completed verification
+    // is owed. It goes first and on its own, so the customer has the card even
+    // if the optional PDF verify or upload fails. The identity summary and the
+    // SN ride along as the photo's caption.
+    const caption =
+      `${c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance })}` +
+      `${serial === null ? "" : `\nSN: ${serial}`}\n\n` +
+      c.otpIdentitySummary({
+        name: result.identity.name.english || result.identity.name.amharic,
+        fan: result.identity.fanNumber,
+        fin: result.identity.fin,
+        dateOfBirth: result.identity.dateOfBirth.gregorian,
+        phone: result.identity.phone,
+        remainingPoints: result.remainingPoints,
+      });
 
-      const image = await toCardImage(result.identity, serial);
-      await deps.api.sendPhoto(
-        user.chatId,
-        { bytes: image, filename: CARD_IMAGE_FILENAME },
-        { caption, replyKeyboard: mainKeyboard(lang, admin) },
-      );
-    } else {
-      // A PDF delivery hands the provider's document through untouched, then
-      // tries to follow it with the designed card.
-      await deps.api.sendDocument(
-        user.chatId,
-        { bytes: result.pdf, filename: result.filename },
-        {
-          caption: c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance }),
-          replyKeyboard: mainKeyboard(lang, admin),
-        },
-      );
+    const image = await toCardImage(result.identity, serial);
+    await deps.api.sendPhoto(
+      user.chatId,
+      { bytes: image, filename: CARD_IMAGE_FILENAME },
+      { caption, replyKeyboard: mainKeyboard(lang, admin) },
+    );
 
-      // The picture's fields were requested while the document was being sent
-      // (see `cardFields`). If they came back, the picture is the designed
-      // front-and-back card. If they did not — a spent code, a provider hiccup
-      // — the picture is the card artwork embedded in the delivered PDF. It is
-      // never the A4 sheet rendered as an image. This block carries its own
-      // guard: the document has been delivered, so an image that fails to
-      // render or upload must not read as a lost card to the catch below.
-      try {
-        const extra = cardFields === null ? null : await cardFields;
-        let image: Buffer;
-        if (extra) {
-          latestPoints = extra.remainingPoints ?? latestPoints;
-          serial = await nextSerial(deps);
-          image = await toCardImage(extra.identity, serial);
-        } else {
-          const sides = await cardSidesFromPdf(result.pdf);
-          if (!sides) throw new Error("the provider's PDF has no card artwork");
-          image = sides;
+    // The image is delivered. From here a failure only costs the original PDF;
+    // it must not read as a lost card to the catch below, which is for the
+    // delivery the customer actually paid for.
+    if (pdfSecond !== null) {
+      const extra = await pdfSecond;
+      if (extra) {
+        latestPoints = extra.remainingPoints ?? latestPoints;
+        try {
+          await deps.api.sendDocument(
+            user.chatId,
+            { bytes: extra.pdf, filename: extra.filename },
+            { caption: c.otpOriginalPdf },
+          );
+        } catch (error) {
+          console.error(
+            "original PDF delivery failed:",
+            error instanceof Error ? error.message : error,
+          );
         }
-        await deps.api.sendPhoto(
-          user.chatId,
-          { bytes: image, filename: CARD_IMAGE_FILENAME },
-          { caption: c.otpCardImage },
-        );
-      } catch (error) {
-        console.error("card image delivery failed:", error instanceof Error ? error.message : error);
       }
     }
   } catch (error) {
-    // The card is paid for twice over by this point — a point upstream and a
-    // point from the customer — so a failed hand-off is the one outcome that
-    // must not pass silently. No file is kept, so it cannot be resent; what a
-    // human can do is refund, which needs them to know.
+    // The card is paid for — a point upstream and a point from the customer —
+    // so a failed hand-off is the one outcome that must not pass silently. No
+    // file is kept, so it cannot be resent; what a human can do is refund,
+    // which needs them to know.
     if (error instanceof BotApiError && error.isUnreachableChat) {
       await deps.store.markBlocked(user.telegramId);
     }
@@ -1219,42 +1211,47 @@ async function onOtpSubmitted(
 }
 
 /**
- * Asks the JSON endpoint for the fields behind a code whose PDF was already
- * delivered, so the picture that follows can be the designed card rather than
- * the card artwork inside the document.
+ * Asks for the provider's original PDF after the JSON verify has delivered the
+ * designed card. This is the second verification, and therefore a second point
+ * upstream; that is a deliberate trade for formats that want the document as
+ * well as the image.
  *
- * This is a second verification and therefore a second point upstream; that is
- * a deliberate trade, made only after the PDF verify has been accepted. Any
- * failure returns null and the caller falls back to the artwork embedded in the
- * provider's document: an already-used code, a provider that is down, or a
- * changed response shape must cost a picture, never the card.
+ * Any failure returns null. An already-used code, a provider that is down, or a
+ * changed response shape costs the PDF, never the card that was already sent.
  *
  * `timeoutMs` is the request's remaining budget, measured from the start of the
  * update. The vendor's guide says a verify can take up to two minutes, so the
  * call gets as much of that budget as is safe rather than a fixed short cap.
  */
-async function identityFromSecondVerify(
+async function pdfFromSecondVerify(
   deps: BotDeps,
   args: { fan: string; otp: string; session: string; timeoutMs: number },
-): Promise<{ identity: CardIdentity; remainingPoints: number | null } | null> {
+): Promise<{ pdf: Buffer; filename: string; remainingPoints: number | null } | null> {
   try {
     const result = await deps.cards.verifyOtp({
       fan: args.fan,
       otp: args.otp,
       session: args.session,
-      format: "json",
+      format: "pdf",
       timeoutMs: args.timeoutMs,
     });
-    if (result.outcome === "verified" && result.format === "json") {
-      return { identity: result.identity, remainingPoints: result.remainingPoints };
+    if (result.outcome === "verified" && result.format === "pdf") {
+      return {
+        pdf: result.pdf,
+        filename: result.filename,
+        remainingPoints: result.remainingPoints,
+      };
     }
     if (result.outcome === "rejected") {
-      console.error(`card image: second verify was rejected: ${result.message}`);
+      console.error(`original PDF: second verify was rejected: ${result.message}`);
     } else {
-      console.error("card image: second verify did not complete");
+      console.error("original PDF: second verify did not complete");
     }
   } catch (error) {
-    console.error("card image: second verify failed:", error instanceof Error ? error.message : error);
+    console.error(
+      "original PDF: second verify failed:",
+      error instanceof Error ? error.message : error,
+    );
   }
   return null;
 }

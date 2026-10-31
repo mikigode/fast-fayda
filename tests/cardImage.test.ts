@@ -5,10 +5,10 @@ import { CARD_IMAGE_FILENAME, code128B, groupFan, toCardImage } from "@/bot/card
 import { SAMPLE_JPEG_BASE64 } from "./fixtures/sample-jpeg";
 
 /**
- * The card image is the front-and-back picture the bot sends for "Printable
- * Card" and after a PDF delivery. These tests pin the two things a caller
- * depends on — that the bytes are a PNG of the agreed size, and that an
- * unusable photo or QR code costs the customer a frame, never the whole image.
+ * The card image is the front-and-back picture every completed verification
+ * receives. These tests pin the two things a caller depends on — that the bytes
+ * are a PNG of the agreed size, and that an unusable photo or QR code costs the
+ * customer a frame, never the whole image.
  */
 
 const IDENTITY: CardIdentity = {

@@ -547,7 +547,7 @@ export async function toCardImage(identity: CardIdentity, serial: number | null 
     drawLine(ctx, level.english, slot[1], LATIN, SIZE_BACK);
   }
   drawLine(ctx, identity.fin, FIN, LATIN, SIZE_BACK, 700);
-  // Allocated per printable card; absent when numbering failed, which must not
+  // Allocated once per card; absent when numbering failed, which must not
   // stop the card itself from being drawn.
   if (serial !== null) drawLine(ctx, `SN ${serial}`, SERIAL, LATIN, SIZE_SERIAL, 700);
 
