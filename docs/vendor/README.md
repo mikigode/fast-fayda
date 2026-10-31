@@ -19,17 +19,17 @@ content type inspected before anything parses it. A client that calls
 successful verification as a failure — with the point already spent.
 
 **Calling both verify endpoints costs two points.** Each successful verify
-deducts one, and the guide is explicit that both endpoints must not be called
-for the same OTP. The bot therefore verifies through exactly one: `/verify-otp`
-by default, `/verify-otp-json` for "Printable Card".
+deducts one, and the bot's PDF flow makes a second, JSON call for the designed
+card picture — only after the PDF has been accepted, and only to get the fields
+for that picture. It is never what produces the document, and if it fails the
+picture falls back to the card artwork embedded in the document.
 
-The PDF is also sent as a picture. The provider embeds the card's front and back
-in its own document, so `src/bot/pdfImage.ts` extracts those two images and
-composes them side by side. That is the picture a PDF delivery arrives with —
-never a rendering of the A4 sheet, and never a reason for a second verify. If a
-document has no such artwork, no picture is sent. "Printable Card" draws its
-picture from the JSON fields instead (`src/bot/cardImage.ts`, on
-`assets/card-background.png`).
+The PDF is also sent as a picture. When the fields behind the code came back,
+that picture is the designed card (`src/bot/cardImage.ts`, drawn on
+`assets/card-background.png` with the holder's particulars). When they did not —
+an already-used code, an outage — `src/bot/pdfImage.ts` takes the card's front
+and back out of the document itself and composes them. The A4 page is never
+rendered as the picture: that is a picture of paper, not of a card.
 
 These are third-party documents, reproduced here for reference. They are not
 authored by this project, and they are not a licence — see
