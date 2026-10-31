@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PDFDocument } from "pdf-lib";
-import { loadImage } from "@napi-rs/canvas";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import type { BotApi, InlineKeyboard } from "@/bot/api";
 import { BotApiError } from "@/bot/api";
 import {
@@ -1635,9 +1635,6 @@ describe("card retrieval", () => {
       filename: "Fayda-1234567890123456.pdf",
       remainingPoints: 496,
     };
-    // The picture wants the identity fields, so a second verify is attempted
-    // after the document. The provider refuses a code it has already accepted.
-    cards.byFormat.json = { outcome: "rejected", message: "OTP already used." };
 
     await startIn("en");
     store.users.get(CHAT)!.points = 3;
@@ -1653,9 +1650,10 @@ describe("card retrieval", () => {
 
     // The default format is "PDF mirror", so the PDF verify endpoint is used —
     // the provider's own document goes out unchanged, not an A4 sheet rendered
-    // here. The picture then asks the JSON endpoint for the same code once.
+    // here. One code, one verify: the vendor's guide forbids calling both
+    // endpoints for the same OTP, so no JSON call follows this one.
     const verifies = cards.calls.filter((c) => c.method === "verifyOtp");
-    expect(verifies.map((c) => c.format)).toEqual(["pdf", "json"]);
+    expect(verifies.map((c) => c.format)).toEqual(["pdf"]);
 
     // The document itself, under the provider's own filename.
     expect(api.documents).toHaveLength(1);
@@ -1666,15 +1664,10 @@ describe("card retrieval", () => {
     // is allocated or printed on it.
     expect(store.cardSerials).toHaveLength(0);
     expect(api.documents[0]?.caption).not.toContain("SN:");
-    // With the code already spent, there are no fields to draw the designed
-    // card from, so its own pages are rendered instead — the fallback costs the
-    // customer a picture, never the card.
-    expect(api.photos).toHaveLength(1);
-    expect(api.photos[0]?.filename).toBe("fayda-card.png");
-    expect(api.photos[0]?.bytes.subarray(0, 8)).toEqual(
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    );
-    expect(api.photos[0]?.caption).toContain("image");
+    // This fixture's document embeds no card artwork, so no picture follows.
+    // The A4 sheet is never rendered as one — that picture is of paper, not of
+    // a card.
+    expect(api.photos).toHaveLength(0);
     expect(store.cardSerials).toHaveLength(0);
 
     expect(await store.getBalance(CHAT)).toBe(2);
@@ -1688,29 +1681,41 @@ describe("card retrieval", () => {
   });
 
   /**
-   * When the provider accepts the code a second time, the picture after the PDF
-   * is the card design itself: `assets/card-background.png` with the holder's
-   * particulars stamped in. The document stays the provider's original; only
-   * the picture is drawn here, so only the picture is numbered.
+   * A PDF delivery also gets a card picture, taken from the artwork the
+   * provider embedded in its own document — front and back, side by side — not
+   * a rendering of the A4 sheet. One verify is made, so one point is spent
+   * upstream and one point is charged here; the picture is extracted, not
+   * drawn, so it carries no serial of ours.
    */
-  it("draws the card design after the original PDF when the fields come back", async () => {
-    const pdf = await PDFDocument.create().then((doc) => {
-      doc.addPage([242.645, 153.071]);
-      return doc.save().then((bytes) => Buffer.from(bytes));
-    });
+  it("sends the card artwork embedded in the original PDF, never the A4 sheet", async () => {
+    const side = async (colour: string) => {
+      const canvas = createCanvas(1200, 1800);
+      const context = canvas.getContext("2d");
+      context.fillStyle = colour;
+      context.fillRect(0, 0, 1200, 1800);
+      return canvas.encode("png");
+    };
+
+    const pdf = await (async () => {
+      const doc = await PDFDocument.create();
+      const page = doc.addPage([595, 842]);
+      const front = await doc.embedPng(await side("#235d71"));
+      const back = await doc.embedPng(await side("#d8d2c4"));
+      page.drawImage(front, { x: 40, y: 420, width: 240, height: 360 });
+      page.drawImage(back, { x: 310, y: 420, width: 240, height: 360 });
+      return Buffer.from(await doc.save());
+    })();
+
     cards.byFormat.pdf = {
       outcome: "verified",
       format: "pdf",
       pdf,
       filename: "Fayda-1234567890123456.pdf",
-      remainingPoints: 497,
-    };
-    cards.byFormat.json = {
-      outcome: "verified",
-      format: "json",
-      identity: IDENTITY,
       remainingPoints: 496,
     };
+    // If this were consulted the test would see a second verify and fail; the
+    // PDF flow must not call the JSON endpoint for the same code.
+    cards.byFormat.json = { outcome: "rejected", message: "should not be called" };
 
     await startIn("en");
     store.users.get(CHAT)!.points = 3;
@@ -1718,28 +1723,23 @@ describe("card retrieval", () => {
     await handleUpdate(message("1234567890123456"), deps);
     await handleUpdate(message("123456"), deps);
 
-    // Original document first, then one JSON verify for the picture's fields.
+    expect(cards.calls.filter((c) => c.method === "verifyOtp").map((c) => c.format)).toEqual(["pdf"]);
+
     expect(api.documents).toHaveLength(1);
     expect(api.documents[0]?.filename).toBe("Fayda-1234567890123456.pdf");
-    expect(cards.calls.filter((c) => c.method === "verifyOtp").map((c) => c.format)).toEqual([
-      "pdf",
-      "json",
-    ]);
 
-    // The picture is the designed card — front and back side by side — not a
-    // rendering of the PDF's pages.
     expect(api.photos).toHaveLength(1);
     const image = await loadImage(api.photos[0]!.bytes);
-    expect(image.width).toBe(2600);
-    expect(image.height).toBe(800);
+    // The two 1200x1800 sides at 2/3 scale, side by side with the 24 px
+    // gutter. The sheet would have been about 1190x1684 here.
+    expect(image.width).toBe(1624);
+    expect(image.height).toBe(1200);
 
-    // Drawn here, so it is numbered; the provider's document in front of it is
-    // untouched and still carries no SN of ours.
-    expect(store.cardSerials).toHaveLength(1);
+    // Extracted from the provider's document, so it is not numbered.
+    expect(store.cardSerials).toHaveLength(0);
     expect(api.documents[0]?.caption).not.toContain("SN:");
 
-    // One point from the customer, as before. The second verify is spent
-    // upstream, which is the trade for the designed picture.
+    // One point from the customer and one spent upstream.
     expect(await store.getBalance(CHAT)).toBe(2);
   });
 

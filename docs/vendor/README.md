@@ -19,20 +19,17 @@ content type inspected before anything parses it. A client that calls
 successful verification as a failure — with the point already spent.
 
 **Calling both verify endpoints costs two points.** Each successful verify
-deducts one. The JSON endpoint returns the same identity as fields instead of a
-rendered document, so the document is fetched through exactly one endpoint: PDF
-by default, JSON for "Printable Card". The bot does make a second, JSON call for
-the PDF flow — but only after the document has been delivered, and only to get
-the fields for the card picture. That is one extra point upstream per PDF
-delivery; it is never what produces the document, and if it fails the picture
-falls back to the PDF's own pages.
+deducts one, and the guide is explicit that both endpoints must not be called
+for the same OTP. The bot therefore verifies through exactly one: `/verify-otp`
+by default, `/verify-otp-json` for "Printable Card".
 
-The PDF is also sent as a picture. When the fields behind the code came back,
-that picture is the designed card (`src/bot/cardImage.ts`, drawn on
-`assets/card-background.png` with the holder's particulars). When they did not —
-an already-used code, an outage — PDFium renders the PDF's pages to a PNG
-instead (see `src/bot/pdfImage.ts`), so a PDF delivery still arrives as a
-picture.
+The PDF is also sent as a picture. The provider embeds the card's front and back
+in its own document, so `src/bot/pdfImage.ts` extracts those two images and
+composes them side by side. That is the picture a PDF delivery arrives with —
+never a rendering of the A4 sheet, and never a reason for a second verify. If a
+document has no such artwork, no picture is sent. "Printable Card" draws its
+picture from the JSON fields instead (`src/bot/cardImage.ts`, on
+`assets/card-background.png`).
 
 These are third-party documents, reproduced here for reference. They are not
 authored by this project, and they are not a licence — see

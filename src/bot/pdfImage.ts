@@ -4,15 +4,18 @@ import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { PDFiumLibrary } from "@hyzyla/pdfium";
 
 /**
- * The provider's PDF, drawn as a picture.
+ * The card artwork inside the provider's PDF.
  *
  * The PDF verify endpoint returns the card as a document and nothing else — no
- * identity fields. The router asks the JSON endpoint for those separately, so
- * the designed card in `cardImage.ts` can be drawn from them, but that second
- * call can be refused (a code is usually already spent by then) or fail. This
- * is the picture for that case: a PDF page is already a description of ink on
- * paper, so rendering it gives the card as an image, without touching the
- * document delivered alongside it.
+ * identity fields — and the vendor's guide forbids calling the JSON endpoint for
+ * the same code (each verify costs a point). The document is not just a sheet,
+ * though: the provider places the card's front and back on it as their own
+ * images. This module takes those two images out and composes them side by side,
+ * which is the picture a customer can print or forward.
+ *
+ * It deliberately never renders the page. A page render is a picture of a sheet
+ * of paper — an A4 form with headings and a QR block — not of a card, and that
+ * is exactly the picture nobody asked for.
  *
  * PDFium — the renderer inside Chrome — is used through its WebAssembly build,
  * so this needs no native binary and no host fonts: a PDF that embeds its fonts
@@ -24,10 +27,9 @@ import { PDFiumLibrary } from "@hyzyla/pdfium";
  *   - It never runs for a document that was not already delivered. The caller
  *     sends the PDF first and then calls this, so a renderer that fails costs
  *     the customer a picture, not their card.
- *   - It is bounded. Pages are composed side by side at a fixed scale, and the
- *     result is scaled down if that would exceed what Telegram accepts as a
- *     photo, so a mislabelled multi-page document cannot turn into a rejected
- *     upload.
+ *   - It is bounded. The sides are drawn at a fixed height and the result is
+ *     kept well inside what Telegram accepts as a photo, so a mislabelled
+ *     document cannot turn into a rejected upload.
  */
 
 /**
@@ -91,47 +93,8 @@ function library(): Promise<PDFiumLibrary> {
   return libraryOnce;
 }
 
-/** Two CSS pixels per PDF point: text is legible without a huge upload. */
-const SCALE = 2;
-/** A white gutter between pages, so a two-page card does not read as one. */
-const PAGE_GAP = 24;
-/**
- * Telegram rejects photos wider or taller than 10,000 px, and a very long strip
- * of pages would also be unreadable. Composing is capped at this width and the
- * pages are scaled down to fit.
- */
-const MAX_WIDTH = 6000;
-
+/** A rendered image: the bytes and the size they decode to. */
 type Rendered = { data: Uint8Array; width: number; height: number };
-
-/**
- * Renders a PDF's pages side by side as one PNG.
- *
- * Throw on any failure — an unreadable document, a missing renderer — because
- * the caller has already delivered the PDF and only loses the extra image.
- */
-export async function toPdfImage(pdf: Buffer): Promise<Buffer> {
-  const pdfium = await library();
-  const document = await pdfium.loadDocument(pdf);
-  try {
-    const pages = [...document.pages()];
-    if (pages.length === 0) throw new Error("the document has no pages");
-
-    const rendered: Rendered[] = [];
-    for (const page of pages) {
-      try {
-        rendered.push(await page.render({ scale: SCALE, colorSpace: "RGBA", render: renderPng }));
-      } finally {
-        // Pages stay loaded until closed or the document is destroyed; a warm
-        // function renders many documents, so close each as soon as it is read.
-        page.close();
-      }
-    }
-    return await compose(rendered);
-  } finally {
-    document.destroy();
-  }
-}
 
 /**
  * PDFium hands back raw RGBA; Skia turns it into the PNG Telegram wants. The
@@ -147,29 +110,83 @@ async function renderPng(options: { width: number; height: number; data: Uint8Ar
   return new Uint8Array(await canvas.encode("png"));
 }
 
-/** One PNG: the pages in order, left to right, on white. */
-async function compose(rendered: Rendered[]): Promise<Buffer> {
-  const images = await Promise.all(rendered.map((page) => loadImage(Buffer.from(page.data))));
+/**
+ * The card artwork the provider embeds in its document: front on the left, back
+ * on the right. Below these sizes an image is the portrait photo or the QR
+ * code, not a side of the card.
+ */
+const SIDE_MIN_WIDTH = 1000;
+const SIDE_MIN_HEIGHT = 1500;
+/** The height each side is drawn at. Two portrait sides come out about 1500 px wide. */
+const SIDE_HEIGHT = 1200;
+/** A white gutter between the two sides, as the designed card has. */
+const SIDE_GAP = 24;
 
-  const naturalWidth =
-    images.reduce((sum, image) => sum + image.width, 0) + PAGE_GAP * (images.length - 1);
-  const naturalHeight = Math.max(...images.map((image) => image.height));
-  const scale = Math.min(1, MAX_WIDTH / naturalWidth);
-  const width = Math.round(naturalWidth * scale);
-  const height = Math.round(naturalHeight * scale);
+/**
+ * The provider's card front and back as one PNG, taken from the images embedded
+ * in its PDF.
+ *
+ * The A4 document is a sheet, not a card: rendering it gives a picture of paper.
+ * The artwork itself is in there, though, as the front and back images the
+ * provider placed on that sheet, so this draws those side by side instead — the
+ * same picture the designed card gives, just in the provider's own design and
+ * portrait proportions rather than this bot's.
+ *
+ * Null on any failure. The PDF has already been delivered when this runs, so a
+ * document whose images cannot be read costs a picture at most, and the caller
+ * simply sends no picture rather than an A4 raster nobody asked for.
+ */
+export async function cardSidesFromPdf(pdf: Buffer): Promise<Buffer | null> {
+  try {
+    const pdfium = await library();
+    const document = await pdfium.loadDocument(pdf);
+    try {
+      const sides: Rendered[] = [];
+      for (const page of document.pages()) {
+        try {
+          for (const object of page.objects()) {
+            // Only the card sides are this large; the photo and QR are not.
+            if (object.type !== "image") continue;
+            const image = await object.render({ render: renderPng });
+            if (image.width < SIDE_MIN_WIDTH || image.height < SIDE_MIN_HEIGHT) continue;
+            sides.push(image);
+          }
+        } finally {
+          page.close();
+        }
+      }
+      if (sides.length === 0) return null;
+      // Document order puts the front before the back; a document with extra
+      // large images keeps the first two it placed.
+      return await composeSides(sides.slice(0, 2));
+    } finally {
+      document.destroy();
+    }
+  } catch (error) {
+    console.error("card sides: could not read the document:", error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+/** One PNG: the card sides in order, on white, at a printable size. */
+async function composeSides(rendered: Rendered[]): Promise<Buffer> {
+  const images = await Promise.all(rendered.map((side) => loadImage(Buffer.from(side.data))));
+
+  const tallest = Math.max(...images.map((image) => image.height));
+  const scale = Math.min(1, SIDE_HEIGHT / tallest);
+  const widths = images.map((image) => Math.round(image.width * scale));
+  const height = Math.round(tallest * scale);
+  const width = widths.reduce((sum, part) => sum + part, 0) + SIDE_GAP * (images.length - 1);
 
   const canvas = createCanvas(width, height);
   const context = canvas.getContext("2d");
-  // Explicitly white rather than transparent: a forwarded image with a
-  // transparent margin shows up black in some clients.
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, width, height);
 
   let x = 0;
-  for (const image of images) {
-    const drawnWidth = image.width * scale;
-    context.drawImage(image, x, 0, drawnWidth, image.height * scale);
-    x += drawnWidth + PAGE_GAP * scale;
+  for (const [index, image] of images.entries()) {
+    context.drawImage(image, x, 0, widths[index]!, height);
+    x += widths[index]! + SIDE_GAP;
   }
   return canvas.encode("png");
 }

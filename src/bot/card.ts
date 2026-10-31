@@ -100,9 +100,8 @@ export type CardProvider = {
     /** Which endpoint: the rendered PDF, or the structured JSON. */
     format: "pdf" | "json";
     /**
-     * Overrides the provider's default wait for this one call. The picture's
-     * second verify uses a shorter one, so a slow answer cannot push the
-     * delivery past the platform's function limit.
+     * Overrides the provider's default wait for this one call, for a caller
+     * that has less time than the platform's usual budget.
      */
     timeoutMs?: number;
   }): Promise<VerifyOtpResult>;

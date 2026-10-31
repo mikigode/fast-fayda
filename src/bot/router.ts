@@ -6,10 +6,10 @@ import {
   type InlineKeyboard,
   type ReplyKeyboard,
 } from "./api";
-import { liveCardProvider, type CardIdentity, type CardProvider } from "./card";
+import { liveCardProvider, type CardProvider } from "./card";
 import { broadcastToUsers } from "./broadcast";
 import { CARD_IMAGE_FILENAME, toCardImage } from "./cardImage";
-import { toPdfImage } from "./pdfImage";
+import { cardSidesFromPdf } from "./pdfImage";
 import { toIdentityPdf, toPrintable } from "./printable";
 import { open, seal } from "../crypto";
 import { currentProvider, hashId, last4, parseId, type FaydaProvider } from "./fayda";
@@ -945,22 +945,15 @@ async function onFanSubmitted(
 const OTP_ATTEMPT_LIMIT = 3;
 
 /**
- * How long the picture's second verify may take.
- *
- * The document is already delivered when this runs, and the function running
- * the whole flow has a hard limit (60s on Vercel). A picture is worth a short
- * wait, not the tail of that budget: if the fields do not arrive quickly, the
- * PDF's own pages are rendered instead.
- */
-const SECOND_VERIFY_TIMEOUT_MS = 15_000;
-
-/**
  * The code, and the one call in this service that costs money.
  *
  * A verify deducts a point from the upstream account on success, so it happens
  * exactly once per code — no retry on timeout, because a retry would either
  * spend a second point or fail on an already-used code, and neither is worth
- * the chance of the first attempt having quietly succeeded.
+ * the chance of the first attempt having quietly succeeded. For the same
+ * reason the PDF flow never follows its verify with a JSON one: the vendor's
+ * guide is explicit that both endpoints must not be called for one OTP, and a
+ * card already paid for must not spend a second point.
  */
 async function onOtpSubmitted(
   deps: BotDeps,
@@ -988,10 +981,9 @@ async function onOtpSubmitted(
   // download format: "Printable Card" builds the A4 sheet here from identity
   // fields (JSON); every other format delivers the provider's own PDF, which is
   // the document people actually want to keep. A PDF result has no identity
-  // fields, so the card picture that follows it asks the JSON endpoint for the
-  // same code afterwards — a second, deliberate point upstream. That call is
-  // made only after the document is delivered (see below), so it can cost a
-  // picture but never the card.
+  // fields, but its document embeds the card artwork, so the picture that
+  // follows it comes from the PDF itself — one verify, one point, exactly as
+  // the vendor's guide requires.
   const wantsPrintable = user.downloadType === "printable";
   const result = await deps.cards.verifyOtp({
     fan,
@@ -1055,15 +1047,13 @@ async function onOtpSubmitted(
   }
 
   // The provider's original PDF is passed through untouched and keeps whatever
-  // numbering the provider already printed in it. A printable card — and the
-  // card picture composed for a PDF delivery, once its fields arrive — is one
-  // this bot drew, so it gets a serial. The allocation for that picture happens
-  // later, after the document has gone out: a code that cannot be verified a
-  // second time must not burn a number.
+  // numbering the provider already printed in it. A printable card — the A4
+  // sheet and the designed picture drawn from JSON identity fields — is one
+  // this bot drew, so it gets a serial. The picture taken from a PDF delivery
+  // is the provider's own artwork and is not numbered.
   let serial: number | null = result.format === "json" ? await nextSerial(deps) : null;
 
-  // The latest upstream balance seen, from either verify. The PDF call's header
-  // is the first answer; a successful second verify is a fresher one.
+  // The latest upstream balance seen, from the verify that produced this card.
   let latestPoints = result.remainingPoints;
 
   try {
@@ -1111,11 +1101,11 @@ async function onOtpSubmitted(
     // The card also goes out as a picture, right after the document: the PDF is
     // what gets printed, the image is what gets forwarded. The printable sheet
     // is drawn from the identity fields it already has. A PDF verify returns
-    // only the document, so the fields for its picture are requested from the
-    // JSON endpoint with the same code — after the document has gone out, so a
-    // second verify that fails (an already-used code, a provider hiccup) costs
-    // the customer a picture at most, and the picture falls back to the
-    // document's own pages. This block carries its own guard for the same
+    // only the document, so its picture is the card artwork the provider
+    // embedded in that document — front and back, taken out of the PDF. It is
+    // never the A4 sheet rendered as an image: that is a picture of paper, and
+    // the vendor's guide forbids a second verify for the same code just to get
+    // fields for a nicer one. This block carries its own guard for the same
     // reason: the card has been delivered, so an image that fails to render or
     // upload must not read as a lost card to the catch below.
     try {
@@ -1123,18 +1113,9 @@ async function onOtpSubmitted(
       if (result.format === "json") {
         image = await toCardImage(result.identity, serial);
       } else {
-        const extra = await identityFromSecondVerify(deps, {
-          fan,
-          otp: code,
-          session: session.providerRef,
-        });
-        if (extra) {
-          latestPoints = extra.remainingPoints ?? latestPoints;
-          serial = await nextSerial(deps);
-          image = await toCardImage(extra.identity, serial);
-        } else {
-          image = await toPdfImage(result.pdf);
-        }
+        const sides = await cardSidesFromPdf(result.pdf);
+        if (!sides) throw new Error("the provider's PDF has no card artwork");
+        image = sides;
       }
       await deps.api.sendPhoto(
         user.chatId,
@@ -1166,41 +1147,6 @@ async function onOtpSubmitted(
   if (latestPoints !== null && latestPoints <= 10) {
     await notifyAdmins(deps, `Card API balance is low: ${latestPoints} points left. Recharge it before deliveries start failing.`);
   }
-}
-
-/**
- * Asks the JSON endpoint for the fields behind a code whose PDF was already
- * delivered, so the picture that follows can be the card design rather than a
- * photograph of a document.
- *
- * This is a second verification and therefore a second point upstream; that is
- * a deliberate trade, made only after the document is safe on the customer's
- * side. Any failure returns null and the caller falls back to the document's
- * own pages: an already-used code, a provider that is down, or a changed
- * response shape must cost a picture, never the card.
- */
-async function identityFromSecondVerify(
-  deps: BotDeps,
-  args: { fan: string; otp: string; session: string },
-): Promise<{ identity: CardIdentity; remainingPoints: number | null } | null> {
-  try {
-    const result = await deps.cards.verifyOtp({
-      ...args,
-      format: "json",
-      timeoutMs: SECOND_VERIFY_TIMEOUT_MS,
-    });
-    if (result.outcome === "verified" && result.format === "json") {
-      return { identity: result.identity, remainingPoints: result.remainingPoints };
-    }
-    if (result.outcome === "rejected") {
-      console.error(`card image: second verify was rejected: ${result.message}`);
-    } else {
-      console.error("card image: second verify did not complete");
-    }
-  } catch (error) {
-    console.error("card image: second verify failed:", error instanceof Error ? error.message : error);
-  }
-  return null;
 }
 
 /**
