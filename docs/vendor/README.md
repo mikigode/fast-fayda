@@ -28,8 +28,9 @@ The PDF is also sent as a picture. When the fields behind the code came back,
 that picture is the designed card (`src/bot/cardImage.ts`, drawn on
 `assets/card-background.png` with the holder's particulars). When they did not —
 an already-used code, an outage — `src/bot/pdfImage.ts` takes the card's front
-and back out of the document itself and composes them. The A4 page is never
-rendered as the picture: that is a picture of paper, not of a card.
+and back out of the document itself and composes them. No A4 page is produced:
+it is a picture of paper, not of a card. "Printable Card" asks for the JSON
+verify in the first place and receives only the designed picture.
 
 These are third-party documents, reproduced here for reference. They are not
 authored by this project, and they are not a licence — see

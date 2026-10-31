@@ -160,7 +160,7 @@ type Copy = {
     phone: string;
     remainingPoints: number | null;
   }) => string;
-  /** Caption on the front-and-back card image that follows the printable PDF. */
+  /** Caption on the front-and-back card image that follows a PDF delivery. */
   otpCardImage: string;
   uploadUnavailable: (admin: string) => string;
   /** Prompt after tapping Fayda Screenshot / Upload PDF, naming the cost. */

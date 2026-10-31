@@ -404,25 +404,24 @@ that retrieval is not connected when it is not.
 tap OTP 1/2/3  → balance checked first, cost named
 send a FAN     → provider sends a code to the phone registered against it
 send the code  → the provider's original PDF comes back and is delivered
-                 as a Telegram document (or, for "Printable Card", an A4
-                 sheet is rendered from the JSON identity), followed by the
-                 same card as a PNG
+                 as a Telegram document, followed by the same card as a PNG
+                 (or, for "Printable Card", just the designed PNG)
 ```
 
 A FAN is verified through the endpoint that matches the chosen download format:
 **`/verify-otp`** for the provider's original PDF (the default, and every format
-except "Printable Card"), or **`/verify-otp-json`** when the A4 printable sheet
-is wanted, which is rendered here from the identity fields (photo and QR
-included). The PDF endpoint returns the document and no fields, so the designed
-card picture that follows a PDF delivery asks `/verify-otp-json` for the same
-code *after* the document has gone out: a second, deliberate point upstream,
-which buys the front-and-back card (`assets/card-background.png` with the
-holder's particulars stamped in) rather than a rasterisation of the PDF's pages.
-If the provider refuses that second call — an already-used code, an outage — the
-picture falls back to the card artwork embedded in the delivered PDF, never the
-A4 sheet; a document with no such artwork simply gets no picture. "Printable
-Card" needs no second call: its verify is the JSON one, and the picture is drawn
-from the same fields. Although the
+except "Printable Card"), or **`/verify-otp-json`** for "Printable Card", whose
+identity fields are drawn here as the 2600×800 front-and-back picture (photo and
+QR included). That format sends no document — the picture is the card. The PDF
+endpoint returns the document and no fields, so the designed card picture that
+follows a PDF delivery asks `/verify-otp-json` for the same code *after* the
+document has gone out: a second, deliberate point upstream, which buys the
+front-and-back card (`assets/card-background.png` with the holder's particulars
+stamped in) rather than a rasterisation of the PDF's pages. If the provider
+refuses that second call — an already-used code, an outage — the picture falls
+back to the card artwork embedded in the delivered PDF; a document with no such
+artwork simply gets no picture. "Printable Card" needs no second call: its
+verify is the JSON one, and its picture is drawn from the same fields. Although the
 published docs describe a `{ otp, fanNumber, session }` body, the live API refuses
 that with "finNumber is required" (on both endpoints). The bot only ever
 collects a 16-digit FAN, so the client derives the required 12-digit `finNumber`
@@ -483,8 +482,9 @@ to see and mark delivered in the admin portal below. Turning an *uploaded* file
 into a printable card — compositing it onto a background template — is not
 built, and is not planned: reproducing the card's security background is
 forgery whoever asks for it. The OTP flow above needs none of that: it delivers
-the provider's own PDF, or — for the "Printable Card" format — renders an A4
-sheet from the identity fields the verify endpoint returns.
+the provider's own PDF, or — for the "Printable Card" format — draws the
+2600×800 front-and-back card from the identity fields the verify endpoint
+returns.
 
 ---
 

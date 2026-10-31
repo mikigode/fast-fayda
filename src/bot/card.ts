@@ -20,8 +20,8 @@ import type { BotStore } from "./store";
  * **The verify format follows the customer's download choice.** `/verify-otp`
  * returns the provider's rendered PDF — what "PDF mirror" (the default) and
  * every other format deliver unchanged. `/verify-otp-json` returns the identity
- * fields the printable A4 sheet and the card image are drawn from, so it is
- * used for the "Printable Card" format. Each successful verify costs a point,
+ * fields the designed card picture is drawn from, so it is used for the
+ * "Printable Card" format. Each successful verify costs a point,
  * and the document is fetched through exactly one endpoint; the JSON one is
  * asked for a second time only after a PDF has been delivered, to get the
  * fields for the picture (see `router.ts`). The PDF branch below is a faithful
@@ -69,7 +69,7 @@ export type VerifyOtpResult =
 /**
  * The structured identity the JSON verify endpoint returns, per the vendor's
  * integration guide. Every pair field carries both scripts; `photo` and
- * `qrCode` are base64 images (or data URIs) for the printable layout.
+ * `qrCode` are base64 images (or data URIs) for the designed card.
  */
 export type CardIdentity = {
   fanNumber: string;

@@ -1867,13 +1867,11 @@ describe("card retrieval", () => {
   });
 
   /**
-   * The printable format gets the card twice: the A4 sheet for paper, and the
-   * same card as a picture — front and back — that is easy to forward. The
-   * image comes second, so a card already delivered as a document is never
-   * withheld because the picture failed. Only the printable format has
-   * identity fields to draw; the original PDF is delivered as-is.
+   * "Printable Card" is the designed picture itself — 2600x800, front and back
+   * on assets/card-background.png — with no A4 document beside it. The image is
+   * what the customer forwards; a page of A4 is not a card.
    */
-  it("follows the printable PDF with the card as a front-and-back image", async () => {
+  it("sends the designed card picture for Printable Card, and no A4 PDF", async () => {
     cards.verifyResult = {
       outcome: "verified",
       format: "json",
@@ -1889,23 +1887,28 @@ describe("card retrieval", () => {
     await handleUpdate(message("1234567890123456"), deps);
     await handleUpdate(message("123456"), deps);
 
-    expect(api.documents).toHaveLength(1);
+    // One verify: the JSON endpoint, whose fields draw the card.
+    expect(cards.calls.filter((c) => c.method === "verifyOtp").map((c) => c.format)).toEqual([
+      "json",
+    ]);
+
+    // No document at all — the A4 sheet is gone from this format.
+    expect(api.documents).toHaveLength(0);
     expect(api.photos).toHaveLength(1);
     expect(api.photos[0]?.filename).toBe("fayda-card.png");
     expect(api.photos[0]?.bytes.subarray(0, 8)).toEqual(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
-    // Two CR80-proportioned panels side by side.
+    // Front and back side by side on the bundled background.
     expect(api.photos[0]?.bytes.readUInt32BE(16)).toBe(2600);
     expect(api.photos[0]?.bytes.readUInt32BE(20)).toBe(800);
-    expect(api.photos[0]?.caption).toContain("Front & back");
-    // The first printable card is numbered 58100, and the number is repeated
-    // in the delivery caption so it can be matched to the paper card.
+    // The first printable card is numbered 58100, and the number travels in
+    // the caption so it can be matched to the image.
     expect(store.cardSerials).toEqual([58100]);
-    expect(api.documents[0]?.caption).toContain("SN: 58100");
+    expect(api.photos[0]?.caption).toContain("SN: 58100");
   });
 
-  it("renders a printable sheet when the download type is printable", async () => {
+  it("recaps the identity in the printable card's caption", async () => {
     cards.verifyResult = {
       outcome: "verified",
       format: "json",
@@ -1921,21 +1924,10 @@ describe("card retrieval", () => {
     await handleUpdate(message("1234567890123456"), deps);
     await handleUpdate(message("123456"), deps);
 
-    // The layout is built by pdf-lib from the JSON identity: the delivered
-    // document is a fresh PDF with two A4 sheets (front and back), named for a
-    // print sheet instead of an upstream file.
-    expect(api.documents).toHaveLength(1);
-    expect(api.documents[0]?.filename).toBe("fayda-printable.pdf");
-    const delivered = await PDFDocument.load(api.documents[0]!.bytes);
-    expect(delivered.getPageCount()).toBe(2);
-    for (const page of delivered.getPages()) {
-      expect(page.getWidth()).toBeGreaterThan(500); // A4 sheets, not an upstream page
-    }
-    // The JSON endpoint was asked for, so the same code is never sent twice.
-    expect(cards.calls.find((c) => c.method === "verifyOtp")?.format).toBe("json");
+    expect(api.documents).toHaveLength(0);
     // The caption recaps the identity the JSON verify returned — the guide's
     // summary, alongside the card — including the provider's remaining points.
-    const caption = api.documents[0]?.caption ?? "";
+    const caption = api.photos[0]?.caption ?? "";
     expect(caption).toContain("Abebe Kebede");
     expect(caption).toContain("1234567890");
     expect(caption).toContain("1988-05-09");
@@ -1970,9 +1962,10 @@ describe("card retrieval", () => {
     await deliver();
 
     expect(store.cardSerials).toEqual([58100, 58101]);
-    expect(api.documents).toHaveLength(2);
-    expect(api.documents[0]?.caption).toContain("SN: 58100");
-    expect(api.documents[1]?.caption).toContain("SN: 58101");
+    expect(api.documents).toHaveLength(0);
+    expect(api.photos).toHaveLength(2);
+    expect(api.photos[0]?.caption).toContain("SN: 58100");
+    expect(api.photos[1]?.caption).toContain("SN: 58101");
   });
 
   /**
@@ -1998,9 +1991,9 @@ describe("card retrieval", () => {
       await handleUpdate(message("1234567890123456"), deps);
       await handleUpdate(message("123456"), deps);
 
-      expect(api.documents).toHaveLength(1);
+      expect(api.documents).toHaveLength(0);
       expect(api.photos).toHaveLength(1);
-      expect(api.documents[0]?.caption).not.toContain("SN:");
+      expect(api.photos[0]?.caption).not.toContain("SN:");
       expect(errors.mock.calls.flat().join(" ")).toContain("card serial allocation failed");
     } finally {
       errors.mockRestore();

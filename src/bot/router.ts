@@ -10,7 +10,6 @@ import { liveCardProvider, type CardIdentity, type CardProvider } from "./card";
 import { broadcastToUsers } from "./broadcast";
 import { CARD_IMAGE_FILENAME, toCardImage } from "./cardImage";
 import { cardSidesFromPdf } from "./pdfImage";
-import { toIdentityPdf, toPrintable } from "./printable";
 import { open, seal } from "../crypto";
 import { currentProvider, hashId, last4, parseId, type FaydaProvider } from "./fayda";
 import {
@@ -978,7 +977,7 @@ const OTP_ATTEMPT_LIMIT = 3;
  * started as soon as the first succeeds so it can run while the document is
  * being uploaded. The cap is the request's remaining budget rather than a fixed
  * guess: the vendor's guide says to allow ~60–120 s for a verify, and the old
- * 15 s cap is what made production fall back to a picture of the A4 sheet.
+ * 15 s cap is what made production give up on the designed card.
  */
 const UPDATE_BUDGET_MS = 55_000;
 const SECOND_VERIFY_MIN_MS = 5_000;
@@ -1025,18 +1024,22 @@ async function onOtpSubmitted(
     return home(deps, user, lang, c.otpNoSession);
   }
 
-  await deps.api.sendChatAction(user.chatId, "upload_document");
+  await deps.api.sendChatAction(
+    user.chatId,
+    user.downloadType === "printable" ? "typing" : "upload_document",
+  );
   await home(deps, user, lang, c.otpVerifying);
 
   // Which verify endpoint this code uses is decided by the customer's chosen
-  // download format: "Printable Card" builds the A4 sheet here from identity
-  // fields (JSON); every other format delivers the provider's own PDF, which is
-  // the document people actually want to keep. A PDF result has no identity
-  // fields, so the designed card picture that follows it asks the JSON endpoint
-  // for the same code once — a second, deliberate point upstream. That call is
-  // started as soon as this verify is accepted and runs while the PDF is being
-  // prepared and sent (see `cardFields`), so it costs time the request was
-  // spending anyway and can cost a picture at most, never the card.
+  // download format: "Printable Card" asks for identity fields (JSON) so the
+  // designed card picture can be drawn here; every other format delivers the
+  // provider's own PDF, which is the document people actually want to keep. A
+  // PDF result has no identity fields, so the designed card picture that
+  // follows it asks the JSON endpoint for the same code once — a second,
+  // deliberate point upstream. That call is started as soon as this verify is
+  // accepted and runs while the PDF is being prepared and sent (see
+  // `cardFields`), so it costs time the request was spending anyway and can
+  // cost a picture at most, never the card.
   const wantsPrintable = user.downloadType === "printable";
   const result = await deps.cards.verifyOtp({
     fan,
@@ -1125,64 +1128,54 @@ async function onOtpSubmitted(
   let latestPoints = result.remainingPoints;
 
   try {
-    // A JSON verify delivers a structured identity, from which the print sheet
-    // is rendered here; a PDF verify hands the provider's document through.
-    const filename = result.format === "json" ? "fayda-printable.pdf" : result.filename;
-    const bytes =
-      result.format === "json"
-        ? await toPrintable(result.identity, serial).catch((error) => {
-            // A card that exists should always reach the customer; if the
-            // print layout cannot be built, hand over the bare identity fields
-            // rather than nothing.
-            console.error("printable render failed:", error instanceof Error ? error.message : error);
-            return toIdentityPdf(result.identity, serial);
-          })
-        : result.pdf;
-
-    // A JSON verify also carries the identity fields, so the card goes out
-    // with a short text recap the customer can read at a glance. A PDF verify
-    // returns only the document, so it keeps the plain caption.
-    const caption =
-      result.format === "json"
-        ? `${c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance })}` +
-          `${serial === null ? "" : `\nSN: ${serial}`}\n\n` +
-          c.otpIdentitySummary({
-            name: result.identity.name.english || result.identity.name.amharic,
-            fan: result.identity.fanNumber,
-            fin: result.identity.fin,
-            dateOfBirth: result.identity.dateOfBirth.gregorian,
-            phone: result.identity.phone,
-            remainingPoints: result.remainingPoints,
-          })
-        : c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance });
-
     const admin = await isAdmin(deps, user.telegramId);
-    await deps.api.sendDocument(
-      user.chatId,
-      { bytes, filename },
-      {
-        caption,
-        replyKeyboard: mainKeyboard(lang, admin),
-      },
-    );
 
-    // The card also goes out as a picture, right after the document: the PDF is
-    // what gets printed, the image is what gets forwarded. The printable sheet
-    // is drawn from the identity fields it already has. For a PDF delivery the
-    // fields were requested from the JSON endpoint with the same code while the
-    // document was being sent (see `cardFields`); if they came back, the
-    // picture is the designed front-and-back card. If they did not — a spent
-    // code, a provider hiccup — the picture is the card artwork embedded in the
-    // delivered PDF. It is never the A4 sheet rendered as an image. This block
-    // carries its own guard for the same reason: the card has been delivered,
-    // so an image that fails to render or upload must not read as a lost card
-    // to the catch below.
-    try {
-      let image: Buffer;
-      if (result.format === "json") {
-        image = await toCardImage(result.identity, serial);
-      } else {
+    if (result.format === "json") {
+      // "Printable Card" is the designed picture itself — 2600x800 front and
+      // back on assets/card-background.png — and nothing else. There is no A4
+      // sheet: the customer forwards this image and prints it if they want to,
+      // rather than receiving a page of paper rendered as a document. The
+      // identity summary rides along as the photo's caption.
+      const caption =
+        `${c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance })}` +
+        `${serial === null ? "" : `\nSN: ${serial}`}\n\n` +
+        c.otpIdentitySummary({
+          name: result.identity.name.english || result.identity.name.amharic,
+          fan: result.identity.fanNumber,
+          fin: result.identity.fin,
+          dateOfBirth: result.identity.dateOfBirth.gregorian,
+          phone: result.identity.phone,
+          remainingPoints: result.remainingPoints,
+        });
+
+      const image = await toCardImage(result.identity, serial);
+      await deps.api.sendPhoto(
+        user.chatId,
+        { bytes: image, filename: CARD_IMAGE_FILENAME },
+        { caption, replyKeyboard: mainKeyboard(lang, admin) },
+      );
+    } else {
+      // A PDF delivery hands the provider's document through untouched, then
+      // tries to follow it with the designed card.
+      await deps.api.sendDocument(
+        user.chatId,
+        { bytes: result.pdf, filename: result.filename },
+        {
+          caption: c.otpDelivered({ pointsSpent: env.pointsPerPrint, balance: spend.balance }),
+          replyKeyboard: mainKeyboard(lang, admin),
+        },
+      );
+
+      // The picture's fields were requested while the document was being sent
+      // (see `cardFields`). If they came back, the picture is the designed
+      // front-and-back card. If they did not — a spent code, a provider hiccup
+      // — the picture is the card artwork embedded in the delivered PDF. It is
+      // never the A4 sheet rendered as an image. This block carries its own
+      // guard: the document has been delivered, so an image that fails to
+      // render or upload must not read as a lost card to the catch below.
+      try {
         const extra = cardFields === null ? null : await cardFields;
+        let image: Buffer;
         if (extra) {
           latestPoints = extra.remainingPoints ?? latestPoints;
           serial = await nextSerial(deps);
@@ -1192,20 +1185,20 @@ async function onOtpSubmitted(
           if (!sides) throw new Error("the provider's PDF has no card artwork");
           image = sides;
         }
+        await deps.api.sendPhoto(
+          user.chatId,
+          { bytes: image, filename: CARD_IMAGE_FILENAME },
+          { caption: c.otpCardImage },
+        );
+      } catch (error) {
+        console.error("card image delivery failed:", error instanceof Error ? error.message : error);
       }
-      await deps.api.sendPhoto(
-        user.chatId,
-        { bytes: image, filename: CARD_IMAGE_FILENAME },
-        { caption: c.otpCardImage },
-      );
-    } catch (error) {
-      console.error("card image delivery failed:", error instanceof Error ? error.message : error);
     }
   } catch (error) {
     // The card is paid for twice over by this point — a point upstream and a
     // point from the customer — so a failed hand-off is the one outcome that
-    // must not pass silently. The PDF is not kept, so it cannot be resent;
-    // what a human can do is refund, which needs them to know.
+    // must not pass silently. No file is kept, so it cannot be resent; what a
+    // human can do is refund, which needs them to know.
     if (error instanceof BotApiError && error.isUnreachableChat) {
       await deps.store.markBlocked(user.telegramId);
     }
@@ -1213,7 +1206,7 @@ async function onOtpSubmitted(
       deps,
       `Card was produced for <code>${user.telegramId}</code> but could not be delivered — ` +
         `${escapeHtml(error instanceof Error ? error.message : String(error))}. ` +
-        `They were charged ${env.pointsPerPrint}; the document is not retained, so this needs a refund.`,
+        `They were charged ${env.pointsPerPrint}; the card is not retained, so this needs a refund.`,
     );
     if (!(error instanceof BotApiError && error.isUnreachableChat)) throw error;
   }
