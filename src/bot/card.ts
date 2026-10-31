@@ -21,7 +21,7 @@ import type { BotStore } from "./store";
  * identity fields the designed card picture is drawn from, and that picture is
  * delivered for every completed verification. `/verify-otp` returns the
  * provider's rendered PDF, which formats other than "Printable Card" also want;
- * it is fetched by a second verify after the JSON one has succeeded. Each
+ * it is fetched by a second verify after the image has been delivered. Each
  * successful verify costs a point, so the customer's one point buys the card
  * and the service absorbs the extra upstream call. The PDF branch below is a
  * faithful client of the provider's API either way.

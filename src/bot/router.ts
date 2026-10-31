@@ -973,10 +973,9 @@ const OTP_ATTEMPT_LIMIT = 3;
  *
  * The designed card is delivered from the first (JSON) verify, so the PDF is
  * only a bonus from here. The function running the whole flow is killed at 60 s
- * on Vercel, and the PDF call is started as soon as the JSON verify succeeds so
- * it can run while the image is being drawn and uploaded. The cap is the
- * request's remaining budget rather than a fixed guess: the vendor's guide says
- * to allow ~60–120 s for a verify.
+ * on Vercel, and the PDF call is attempted after the image has been delivered.
+ * The cap is the request's remaining budget rather than a fixed guess: the
+ * vendor's guide says to allow ~60–120 s for a verify.
  */
 const UPDATE_BUDGET_MS = 55_000;
 const SECOND_VERIFY_MIN_MS = 5_000;
@@ -1006,9 +1005,9 @@ function secondVerifyBudget(startedAt: number): number {
  * 2600x800 card, and that card is the delivery every completed verification is
  * owed: it is sent immediately, with no provider artwork or A4 sheet in its
  * place. For formats that also want the provider's original PDF, a second PDF
- * verify is started as soon as the JSON one succeeds and runs while the image is
- * drawn and uploaded. That is a second point upstream (the customer is still
- * charged one); if it is refused, the PDF is lost and the image is not.
+ * verify is attempted after the image has been delivered. That is a second
+ * point upstream (the customer is still charged one); if it is refused, the PDF
+ * is lost and the image is not.
  */
 async function onOtpSubmitted(
   deps: BotDeps,
@@ -1086,22 +1085,6 @@ async function onOtpSubmitted(
   await deps.store.closeOtpSession(session.id, "verified");
   await deps.store.setState(user.telegramId, "idle");
 
-  // The provider's original PDF is a bonus for formats that ask for it. Its
-  // verify is started now, while the card image is drawn and uploaded, so the
-  // wait overlaps with work the request was doing anyway. It resolves to null
-  // on any failure: a refused or slow second verify costs the PDF, never the
-  // image.
-  const pdfBudget = secondVerifyBudget(startedAt);
-  const pdfSecond =
-    user.downloadType !== "printable" && pdfBudget > 0
-      ? pdfFromSecondVerify(deps, {
-          fan,
-          otp: code,
-          session: session.providerRef,
-          timeoutMs: pdfBudget,
-        })
-      : null;
-
   // Charged only now, against a card that exists. The job is recorded as
   // delivered with no file handle: the card is somebody's identity document and
   // is passed straight to them, never retained here.
@@ -1165,11 +1148,18 @@ async function onOtpSubmitted(
       { caption, replyKeyboard: mainKeyboard(lang, admin) },
     );
 
-    // The image is delivered. From here a failure only costs the original PDF;
-    // it must not read as a lost card to the catch below, which is for the
-    // delivery the customer actually paid for.
-    if (pdfSecond !== null) {
-      const extra = await pdfSecond;
+    // The image is delivered. Only now is the original PDF attempted, so a
+    // refused or slow second verify costs the PDF and never the card, and an
+    // image that could not be sent does not spend another point on a document
+    // nobody can receive.
+    const pdfBudget = secondVerifyBudget(startedAt);
+    if (user.downloadType !== "printable" && pdfBudget > 0) {
+      const extra = await pdfFromSecondVerify(deps, {
+        fan,
+        otp: code,
+        session: session.providerRef,
+        timeoutMs: pdfBudget,
+      });
       if (extra) {
         latestPoints = extra.remainingPoints ?? latestPoints;
         try {

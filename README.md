@@ -416,11 +416,12 @@ and cannot be withheld by a later failure. "Printable Card" stops there, because
 the picture *is* the card.
 
 For the other formats, the provider's original PDF follows as a second,
-best-effort call to **`/verify-otp`**. It is started as soon as the JSON verify
-succeeds, so it runs while the image is being drawn and uploaded. If the provider
-refuses it — an already-used code, an outage, no time left in the request — the
-customer keeps the image and simply does not get the PDF. Nothing falls back to
-artwork rasterised from a PDF, and no A4 sheet is produced.
+best-effort call to **`/verify-otp`**. It is attempted after the image has been
+delivered, so the card is already safely in the chat before the provider is asked
+for anything else. If the provider refuses it — an already-used code, an outage,
+no time left in the request — the customer keeps the image and simply does not
+get the PDF. Nothing falls back to artwork rasterised from a PDF, and no A4 sheet
+is produced.
 
 That second verify is another point spent upstream; the customer is still
 charged one. The previous order (PDF first, JSON second) meant a refused second
