@@ -76,6 +76,116 @@ describe("toCardImage", () => {
     expect(png.readUInt32BE(20)).toBe(800);
   });
 
+  /**
+   * A portrait is printed with the card's design behind it, not on a second
+   * rectangle of studio wall. These two cases pin both halves of that promise:
+   * a plain backdrop is removed, and a photo the fill cannot understand is left
+   * alone rather than being damaged.
+   */
+  it("cuts a plain portrait backdrop out so the card design shows through", async () => {
+    const portrait = createCanvas(240, 320);
+    const portraitCtx = portrait.getContext("2d");
+    portraitCtx.fillStyle = "#ff00ff";
+    portraitCtx.fillRect(0, 0, portrait.width, portrait.height);
+    portraitCtx.fillStyle = "#c62828";
+    portraitCtx.beginPath();
+    portraitCtx.ellipse(120, 160, 62, 88, 0, 0, Math.PI * 2);
+    portraitCtx.fill();
+
+    const png = await toCardImage({
+      ...IDENTITY,
+      photo: `data:image/png;base64,${portrait.encodeSync("png").toString("base64")}`,
+    });
+    const image = await loadImage(png);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    const pixelAt = (x: number, y: number): number[] => Array.from(ctx.getImageData(x, y, 1, 1).data);
+
+    // The corner of the portrait slot maps to the magenta backdrop. Removed,
+    // it must be the design's teal rather than the studio colour.
+    const corner = pixelAt(110, 270);
+    expect(corner[0]).toBeLessThan(220);
+    expect(corner[1]).toBeGreaterThan(150);
+    expect(corner[2]).toBeGreaterThan(140);
+
+    // The middle of the subject is still the subject, not a hole.
+    const centre = pixelAt(274, 500);
+    expect(centre[0]).toBeGreaterThan(140);
+    expect(centre[1]).toBeLessThan(100);
+  });
+
+  it("follows a shaded backdrop without eating the shoulders that touch the edge", async () => {
+    const portrait = createCanvas(240, 320);
+    const portraitCtx = portrait.getContext("2d");
+    const backdrop = portraitCtx.createLinearGradient(0, 0, 0, portrait.height);
+    backdrop.addColorStop(0, "#f4f4f4");
+    backdrop.addColorStop(1, "#c8d8e8");
+    portraitCtx.fillStyle = backdrop;
+    portraitCtx.fillRect(0, 0, portrait.width, portrait.height);
+    portraitCtx.fillStyle = "#1f2a44";
+    portraitCtx.beginPath();
+    portraitCtx.moveTo(55, portrait.height);
+    portraitCtx.lineTo(75, 185);
+    portraitCtx.quadraticCurveTo(120, 160, 165, 185);
+    portraitCtx.lineTo(185, portrait.height);
+    portraitCtx.closePath();
+    portraitCtx.fill();
+    portraitCtx.fillStyle = "#d2a679";
+    portraitCtx.beginPath();
+    portraitCtx.ellipse(120, 120, 42, 52, 0, 0, Math.PI * 2);
+    portraitCtx.fill();
+
+    const png = await toCardImage({
+      ...IDENTITY,
+      photo: `data:image/png;base64,${portrait.encodeSync("png").toString("base64")}`,
+    });
+    const image = await loadImage(png);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    const pixelAt = (x: number, y: number): number[] => Array.from(ctx.getImageData(x, y, 1, 1).data);
+
+    // The shaded corner is still backdrop, and is cleared.
+    const corner = pixelAt(110, 270);
+    expect(corner[0]).toBeLessThan(220);
+    expect(corner[1]).toBeGreaterThan(150);
+
+    // The shirt runs off the bottom of the portrait and must survive, even
+    // though the fill was seeded from that same border.
+    const shirt = pixelAt(274, 725);
+    expect(shirt[0]).toBeLessThan(90);
+    expect(shirt[1]).toBeLessThan(90);
+    expect(shirt[2]).toBeLessThan(110);
+  });
+
+  it("leaves a portrait with a busy backdrop alone instead of guessing", async () => {
+    const portrait = createCanvas(240, 320);
+    const portraitCtx = portrait.getContext("2d");
+    for (let y = 0; y < portrait.height; y += 40) {
+      for (let x = 0; x < portrait.width; x += 40) {
+        portraitCtx.fillStyle = (x / 40 + y / 40) % 2 === 0 ? "#000000" : "#ffffff";
+        portraitCtx.fillRect(x, y, 40, 40);
+      }
+    }
+
+    const png = await toCardImage({
+      ...IDENTITY,
+      photo: `data:image/png;base64,${portrait.encodeSync("png").toString("base64")}`,
+    });
+    const image = await loadImage(png);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+
+    // The same corner maps to the checkerboard's black square. If the fill had
+    // mistaken this border for a backdrop, the card's teal would show instead.
+    const corner = Array.from(ctx.getImageData(110, 270, 1, 1).data);
+    expect(corner[0]).toBeLessThan(24);
+    expect(corner[1]).toBeLessThan(24);
+    expect(corner[2]).toBeLessThan(24);
+  });
+
   it("sends the filename Telegram is given, which the router passes through", () => {
     expect(CARD_IMAGE_FILENAME).toBe("fayda-card.png");
   });

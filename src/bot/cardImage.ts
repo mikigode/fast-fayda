@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { GlobalFonts, createCanvas, loadImage, type SKRSContext2D } from "@napi-rs/canvas";
+import { GlobalFonts, createCanvas, loadImage, type Canvas, type SKRSContext2D } from "@napi-rs/canvas";
 import type { CardIdentity } from "./card";
 
 /**
@@ -39,6 +39,8 @@ const INK = "#111111";
 
 type Ctx = SKRSContext2D;
 type LoadedImage = Awaited<ReturnType<typeof loadImage>>;
+/** A bitmap the context can draw: a decoded photo, or a canvas we drew into. */
+type Drawable = LoadedImage | Canvas;
 type Box = { x: number; y: number; w: number; h: number };
 /** A text slot: where the value starts, its baseline, and how wide it may run. */
 type Line = { x: number; baseline: number; w: number };
@@ -284,8 +286,192 @@ function loadBackground(): Promise<LoadedImage | null> {
   return backgroundOnce;
 }
 
+/**
+ * The largest edge at which a portrait is keyed.
+ *
+ * The work is linear in pixels — one visit per backdrop pixel — so a cap keeps
+ * a large upload from making the card expensive. It still leaves the result
+ * well above the 351 px slot, so the slot's own scaling filters the mask's
+ * hard pixel edge rather than exposing it.
+ */
+const CUTOUT_MAX_SIDE = 900;
+
+/**
+ * Cuts the studio backdrop out of a portrait so the card's printed design
+ * shows behind the holder.
+ *
+ * There is no segmentation model in this project, and a serverless function is
+ * the wrong place to add tens of megabytes of weights, so this does what a
+ * chroma key does: it reads the border ring as the backdrop, then flood-fills
+ * inward across pixels that stay close to that colour.
+ *
+ * The fill is deliberately conservative. A pixel must be within `hard` of the
+ * border's median colour, and when it is further than `local` from that median
+ * it must also be within `local` of the pixel the fill came from. That lets a
+ * gently shaded studio wall be followed without stepping over the sharp edge
+ * into a face or a shirt.
+ *
+ * If the border is not reasonably uniform, or the fill would remove almost
+ * everything or almost nothing, the photo is returned untouched: an unremoved
+ * background is a much better card than a portrait with its face eaten.
+ */
+function cutOutBackdrop(image: LoadedImage): Canvas | null {
+  const fit = Math.min(1, CUTOUT_MAX_SIDE / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * fit));
+  const height = Math.max(1, Math.round(image.height * fit));
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0, width, height);
+  const frame = ctx.getImageData(0, 0, width, height);
+  const pixels = frame.data;
+  const total = width * height;
+
+  // A portrait that is already transparent has been cut out upstream; running
+  // the fill again could only damage it.
+  let opaque = 0;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i]! > 250) opaque++;
+  if (opaque < total * 0.98) return null;
+
+  /*
+   * The border ring is the part of a normally framed portrait guaranteed to be
+   * backdrop. Its median colour is the colour to key out, and its spread says
+   * whether there is a backdrop worth keying at all: a studio wall is nearly
+   * flat, a street or a hedge is not.
+   */
+  const ring = Math.max(2, Math.round(Math.min(width, height) * 0.02));
+  const stride = Math.max(1, Math.round(Math.max(width, height) / 600));
+  const reds: number[] = [];
+  const greens: number[] = [];
+  const blues: number[] = [];
+  const sample = (x: number, y: number): void => {
+    const i = (y * width + x) * 4;
+    if (pixels[i + 3]! < 200) return;
+    reds.push(pixels[i]!);
+    greens.push(pixels[i + 1]!);
+    blues.push(pixels[i + 2]!);
+  };
+  for (let y = 0; y < ring; y += stride) {
+    for (let x = 0; x < width; x += stride) {
+      sample(x, y);
+      sample(x, height - 1 - y);
+    }
+  }
+  for (let x = 0; x < ring; x += stride) {
+    for (let y = ring; y < height - ring; y += stride) {
+      sample(x, y);
+      sample(width - 1 - x, y);
+    }
+  }
+  if (reds.length < 16) return null;
+
+  const median = (values: number[]): number => {
+    values.sort((a, b) => a - b);
+    return values[values.length >> 1]!;
+  };
+  const bgR = median(reds);
+  const bgG = median(greens);
+  const bgB = median(blues);
+
+  const deviations = reds
+    .map((red, i) =>
+      Math.max(Math.abs(red - bgR), Math.abs(greens[i]! - bgG), Math.abs(blues[i]! - bgB)),
+    )
+    .sort((a, b) => a - b);
+  const spread = deviations[deviations.length >> 1]!;
+  // A busy border — foliage, a street, a patterned wall — cannot be keyed
+  // reliably. Leave the portrait as the API sent it.
+  if (spread > 55) return null;
+
+  /*
+   * `hard` is how far a pixel may be from the median and still count as
+   * backdrop; `local` is how close it must be to the pixel the fill reached
+   * from. The bounds keep compression noise on a flat wall from widening the
+   * key past the subject.
+   */
+  const hard = Math.min(150, Math.max(52, 42 + spread * 2.2));
+  const local = Math.min(48, Math.max(16, 12 + spread * 0.9));
+
+  const distanceFromBackdrop = (i: number): number =>
+    Math.max(
+      Math.abs(pixels[i]! - bgR),
+      Math.abs(pixels[i + 1]! - bgG),
+      Math.abs(pixels[i + 2]! - bgB),
+    );
+  const distanceBetween = (a: number, b: number): number =>
+    Math.max(
+      Math.abs(pixels[a]! - pixels[b]!),
+      Math.abs(pixels[a + 1]! - pixels[b + 1]!),
+      Math.abs(pixels[a + 2]! - pixels[b + 2]!),
+    );
+
+  const mask = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+
+  const seed = (index: number): void => {
+    if (mask[index]) return;
+    if (distanceFromBackdrop(index * 4) > hard) return;
+    mask[index] = 1;
+    queue[tail++] = index;
+  };
+
+  for (let y = 0; y < ring; y++) {
+    for (let x = 0; x < width; x++) {
+      seed(y * width + x);
+      seed((height - 1 - y) * width + x);
+    }
+  }
+  for (let x = 0; x < ring; x++) {
+    for (let y = ring; y < height - ring; y++) {
+      seed(y * width + x);
+      seed(y * width + (width - 1 - x));
+    }
+  }
+
+  while (head < tail) {
+    const index = queue[head++]!;
+    const x = index % width;
+    const y = (index - x) / width;
+
+    const visit = (next: number): void => {
+      if (mask[next]) return;
+      if (distanceFromBackdrop(next * 4) > hard) return;
+      if (
+        distanceFromBackdrop(next * 4) > local &&
+        distanceBetween(next * 4, index * 4) > local
+      ) {
+        // Neither this pixel nor the one it came from is close to the wall's
+        // colour: that is a real edge, not a shade of the backdrop.
+        return;
+      }
+      mask[next] = 1;
+      queue[tail++] = next;
+    };
+
+    if (x > 0) visit(index - 1);
+    if (x + 1 < width) visit(index + 1);
+    if (y > 0) visit(index - width);
+    if (y + 1 < height) visit(index + width);
+  }
+
+  let removed = 0;
+  for (let i = 0; i < total; i++) if (mask[i]) removed++;
+  const coverage = removed / total;
+  // Too little means the border was not really backdrop (or the subject fills
+  // the frame); too much means there is no subject left. Either way the
+  // original is the safer picture.
+  if (coverage < 0.08 || coverage > 0.92) return null;
+
+  for (let i = 0; i < total; i++) {
+    if (mask[i]) pixels[i * 4 + 3] = 0;
+  }
+  ctx.putImageData(frame, 0, 0);
+  return canvas;
+}
+
 /** Draws an image cropped to fill the box (like an ID photo). */
-function drawCover(ctx: Ctx, image: LoadedImage, box: Box): void {
+function drawCover(ctx: Ctx, image: Drawable, box: Box): void {
   const scale = Math.max(box.w / image.width, box.h / image.height);
   const dw = image.width * scale;
   const dh = image.height * scale;
@@ -508,10 +694,12 @@ export async function toCardImage(identity: CardIdentity, serial: number | null 
     ctx.fillRect(0, 0, IMAGE_W, IMAGE_H);
   }
 
-  // Front.
-  if (photo) {
-    drawCover(ctx, photo, PHOTO);
-    drawCover(ctx, photo, PHOTO_THUMB);
+  // Front. The portrait is keyed once and used for both sizes, so the large
+  // and small copies cannot disagree about what is background.
+  const portrait = photo ? cutOutBackdrop(photo) ?? photo : null;
+  if (portrait) {
+    drawCover(ctx, portrait, PHOTO);
+    drawCover(ctx, portrait, PHOTO_THUMB);
   }
   drawLine(ctx, identity.name.amharic, NAME_AM, ETHIOPIC, SIZE_NAME, 700);
   drawLine(ctx, identity.name.english, NAME_EN, LATIN, SIZE_NAME, 700);
